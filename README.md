@@ -16,7 +16,7 @@ npm run build
 go run ./cmd/researchos
 ```
 
-打开 `http://localhost:8080`。健康检查：`http://localhost:8080/health`。
+默认打开 `http://localhost`。健康检查：`http://localhost/health`。如需改用其他端口，可设置 `RESEARCH_OS_ADDR`（例如 `:8080`）。
 
 在启动 Go 服务前，设置 WeKnora 凭据（请只在终端或部署平台的密钥管理中设置，切勿写入仓库）：
 

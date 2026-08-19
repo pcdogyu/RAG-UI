@@ -84,7 +84,7 @@ func main() {
 
 	address := os.Getenv("RESEARCH_OS_ADDR")
 	if address == "" {
-		address = ":8080"
+		address = ":80"
 	}
 	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	log.Printf("Research OS listening on %s", address)
