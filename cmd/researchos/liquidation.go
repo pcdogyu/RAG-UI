@@ -655,11 +655,14 @@ func (s *liquidationService) binanceLoop(ctx context.Context) {
 }
 
 func (s *liquidationService) runBinance(ctx context.Context) error {
-	conn, _, err := websocket.Dial(ctx, "wss://fstream.binance.com/ws/!forceOrder@arr", nil)
+	conn, _, err := websocket.Dial(ctx, "wss://fstream.binance.com/ws", nil)
 	if err != nil {
 		return err
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
+	if err := wsjson.Write(ctx, conn, map[string]any{"method": "SUBSCRIBE", "params": []string{"!forceOrder@arr"}, "id": 1}); err != nil {
+		return err
+	}
 	s.setDirectStatus("binance", true, nil)
 	for {
 		var raw json.RawMessage
