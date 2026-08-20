@@ -49,10 +49,12 @@ function BuildFooter() {
 
 function AskPage() {
   type ToolCall = { name: string, detail: string, source: 'agent' | 'gateway', started_at: string, duration_ms: number, status: 'completed' | 'failed' }
+  type Citation = { id: string, title: string, url?: string, source?: 'internal' | 'external', chunk_id?: string }
+  const scopeOptions = [{ value: '仅内部', label: '仅内部' }, { value: '内部 + 实时', label: '内部+实时' }, { value: '实时', label: '实时' }]
   const [scope, setScope] = useState('内部 + 实时')
   const [question, setQuestion] = useState('')
   const [answer, setAnswer] = useState<string | null>(null)
-  const [citations, setCitations] = useState<{ id: string, title: string, url?: string }[]>([])
+  const [citations, setCitations] = useState<Citation[]>([])
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([])
   const [answerSource, setAnswerSource] = useState('')
   const [answerScope, setAnswerScope] = useState('')
@@ -71,7 +73,7 @@ function AskPage() {
     setAnswerScope('')
     try {
       const response = await fetch('/api/v1/research/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: normalizedQuestion, scope }) })
-      const result = await response.json().catch(() => null) as { error?: string, source?: string, answer?: { conclusion?: string, citations?: { id: string, title: string, url?: string }[], tool_calls?: ToolCall[] } } | null
+      const result = await response.json().catch(() => null) as { error?: string, source?: string, answer?: { conclusion?: string, citations?: Citation[], tool_calls?: ToolCall[] } } | null
       if (!response.ok || !result?.answer?.conclusion) throw new Error(result?.error || 'HYGR 未返回可展示的研究回答，请稍后重试。')
       setAnswer(result.answer.conclusion)
       setCitations(result.answer.citations ?? [])
@@ -85,13 +87,15 @@ function AskPage() {
       setIsLoading(false)
     }
   }
+  const internalCitations = citations.filter(citation => (citation.source ?? 'internal') === 'internal')
+  const externalCitations = citations.filter(citation => citation.source === 'external')
   return <div className="ask-layout">
     <Card className="ask-hero">
       <div className="eyebrow">ASK RESEARCH <span>WEKNORA RETRIEVAL READY</span></div>
       <h2>今天，想验证什么判断？</h2>
       <p>答案会区分历史观点与当前信息，并保留每条证据的时间锚点。</p>
       <div className="ask-connection"><i /> HYGR 智能问答已连接 · 当前页直接检索与回答</div>
-      <div className="scope-row">{['仅内部', '内部 + 实时', '仅原始来源'].map(item => <button key={item} disabled={isLoading} onClick={() => setScope(item)} className={`scope ${scope === item ? 'active' : ''}`}>{item}</button>)}</div>
+      <div className="scope-row">{scopeOptions.map(item => <button key={item.value} disabled={isLoading} onClick={() => setScope(item.value)} className={`scope ${scope === item.value ? 'active' : ''}`}>{item.label}</button>)}</div>
       <div className="ask-box"><input aria-label="研究问题" disabled={isLoading} placeholder="输入需要验证的研究判断…" value={question} onChange={e => { setQuestion(e.target.value); setError(null) }} onKeyDown={e => e.key === 'Enter' && void submit()} /><button disabled={isLoading || !question.trim()} onClick={() => void submit()}>{isLoading ? '检索中…' : '发起研究 →'}</button></div>
       <div className="quick-row">{['问财报', '问事件', '问标的', '问持仓', '问历史'].map(x => <button disabled={isLoading} key={x} onClick={() => { setQuestion(`${x}：请给出当前最重要的研究结论`); setError(null) }}>{x}</button>)}</div>
     </Card>
@@ -101,7 +105,7 @@ function AskPage() {
       <div className="answer-top"><div><Pill tone="violet">{answerScope}</Pill><span className="temporal">{answerSource}</span></div></div>
       <div className="question-label">{answeredQuestion}</div>
       <div className="answer-content"><h4>研究回答</h4><p>{answer}</p></div>
-      <div className="citations"><span>检索引用</span>{citations.length ? citations.map((citation, i) => citation.url ? <a key={citation.id || citation.title} href={citation.url} target="_blank" rel="noreferrer">[{i + 1}] {citation.title}</a> : <span className="citation-chip" key={citation.id || citation.title}>[{i + 1}] {citation.title}</span>) : <span className="no-citation">本次回答未返回可展示的引用。</span>}</div>
+      <section className="citations"><span>检索引用</span>{citations.length ? <div className="citation-groups">{internalCitations.length > 0 && <div className="internal-citations"><label>内部知识库</label>{internalCitations.map((citation, index) => <article className="internal-citation" key={`${citation.id}-${index}`}><span>▣</span><div><b>{citation.title}</b>{citation.chunk_id && <small>片段 {citation.chunk_id.slice(0, 8)}</small>}</div></article>)}</div>}{externalCitations.length > 0 && <div className="external-citations"><label>外部实时来源</label>{externalCitations.map((citation, index) => citation.url ? <a key={`${citation.id}-${index}`} href={citation.url} target="_blank" rel="noreferrer">{citation.title} ↗</a> : <span className="citation-chip" key={`${citation.id}-${index}`}>{citation.title}</span>)}</div>}</div> : <span className="no-citation">本次回答未返回可展示的引用。</span>}</section>
       <details className="tool-history" open>
         <summary>工具调用历史 <span>{toolCalls.length} 步</span></summary>
         <p className="tool-history-note">优先展示 WeKnora 智能体实际执行的工具，再记录本服务的调用步骤；不展示令牌、密码、会话 ID、工具参数或问题原文。</p>

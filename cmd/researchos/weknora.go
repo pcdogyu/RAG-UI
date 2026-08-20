@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -127,10 +128,26 @@ type WeKnoraAnswer struct {
 }
 
 type ResearchCitation struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	URL   string `json:"url,omitempty"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	URL     string `json:"url,omitempty"`
+	Source  string `json:"source"`
+	ChunkID string `json:"chunk_id,omitempty"`
 }
+
+type researchScope struct {
+	Label           string
+	Prompt          string
+	UseInternal     bool
+	UseExternalLive bool
+}
+
+var internalToolNames = map[string]struct{}{
+	"grep_chunks": {}, "knowledge_search": {}, "list_knowledge_chunks": {}, "query_knowledge_graph": {}, "get_document_info": {}, "database_query": {},
+}
+
+var knowledgeTagPattern = regexp.MustCompile(`(?s)<kb\s+([^>]*?)/?\s*>`)
+var knowledgeTagAttributePattern = regexp.MustCompile(`([a-zA-Z_]+)="([^"]*)"`)
 
 // ResearchToolCall is a non-sensitive audit entry for a real research request.
 // It deliberately excludes credentials, tokens, session IDs, and request text.
@@ -169,9 +186,13 @@ func (c *WeKnoraClient) Ask(ctx context.Context, question, scope string) (WeKnor
 	if !c.config.enabled() {
 		return WeKnoraAnswer{}, fmt.Errorf("WeKnora is not configured")
 	}
+	policy, err := researchScopeFor(scope)
+	if err != nil {
+		return WeKnoraAnswer{}, err
+	}
 	recorder := researchCallRecorder{}
 	var login weKnoraLogin
-	err := recorder.record("身份授权", "向 HYGR 智能问答建立当前请求的授权上下文", func() error {
+	err = recorder.record("身份授权", "向 HYGR 智能问答建立当前请求的授权上下文", func() error {
 		var loginErr error
 		login, loginErr = c.login(ctx)
 		return loginErr
@@ -188,7 +209,7 @@ func (c *WeKnoraClient) Ask(ctx context.Context, question, scope string) (WeKnor
 	if err != nil {
 		return WeKnoraAnswer{ToolCalls: recorder.calls}, err
 	}
-	if c.config.KnowledgeBaseID != "" {
+	if policy.UseInternal && c.config.KnowledgeBaseID != "" {
 		config.KnowledgeBases = []string{c.config.KnowledgeBaseID}
 	}
 	if config.MaxIterations == 0 {
@@ -197,6 +218,7 @@ func (c *WeKnoraClient) Ask(ctx context.Context, question, scope string) (WeKnor
 	if len(config.AllowedTools) == 0 {
 		config.AllowedTools = []string{"knowledge_search"}
 	}
+	applyResearchScope(&config, policy)
 
 	var sessionID string
 	err = recorder.record("创建研究会话", "为本次问题建立独立的 HYGR 研究会话", func() error {
@@ -211,8 +233,8 @@ func (c *WeKnoraClient) Ask(ctx context.Context, question, scope string) (WeKnor
 	if tools == "" {
 		tools = "由智能体默认配置决定"
 	}
-	err = recorder.record("智能体检索与生成", fmt.Sprintf("检索范围：%s；知识库：%d 个；可用工具：%s", scope, len(config.KnowledgeBases), tools), func() error {
-		return c.streamAgentAnswer(ctx, login, sessionID, scopedQuestion(question, scope), config.KnowledgeBases)
+	err = recorder.record("智能体检索与生成", fmt.Sprintf("检索范围：%s；内部知识库：%d 个；可用工具：%s", policy.Label, len(config.KnowledgeBases), tools), func() error {
+		return c.streamAgentAnswer(ctx, login, sessionID, policy.Prompt+"\n\n问题："+question, config.KnowledgeBases, policy.UseExternalLive)
 	})
 	if err != nil {
 		return WeKnoraAnswer{ToolCalls: recorder.calls}, err
@@ -230,18 +252,29 @@ func (c *WeKnoraClient) Ask(ctx context.Context, question, scope string) (WeKnor
 	return answer, nil
 }
 
-// scopedQuestion turns the page's retrieval mode into an explicit request for
-// the WeKnora agent. The original question remains intact for display/audit.
-func scopedQuestion(question, scope string) string {
+func researchScopeFor(scope string) (researchScope, error) {
 	switch scope {
 	case "仅内部":
-		return "请仅使用机构内部研究记忆回答，不调用实时或联网数据。\n\n问题：" + question
+		return researchScope{Label: scope, UseInternal: true, Prompt: "请仅使用机构内部知识库回答。禁止联网、实时搜索、外部 MCP 或外部资料；若内部资料不足，请明确说明。"}, nil
 	case "内部 + 实时":
-		return "请结合机构内部研究记忆与必要的实时市场数据回答，并分别标注来源与时间。\n\n问题：" + question
-	case "仅原始来源":
-		return "请只使用实时数据、原始来源或联网检索回答，不以历史研究结论作为事实依据。\n\n问题：" + question
+		return researchScope{Label: scope, UseInternal: true, UseExternalLive: true, Prompt: "请同时检索机构内部知识库与外部实时资料，并区分两类来源及时间。"}, nil
+	case "实时":
+		return researchScope{Label: scope, UseExternalLive: true, Prompt: "请仅使用外部实时信息、原始来源或联网检索回答。禁止查询、引用或基于机构内部知识库推断；请标注外部来源与时间。"}, nil
 	default:
-		return question
+		return researchScope{}, fmt.Errorf("unsupported research scope %q", scope)
+	}
+}
+
+func applyResearchScope(config *agentConfig, policy researchScope) {
+	if !policy.UseInternal {
+		config.KnowledgeBases = []string{}
+		externalTools := make([]string, 0, len(config.AllowedTools))
+		for _, tool := range config.AllowedTools {
+			if _, internal := internalToolNames[tool]; !internal {
+				externalTools = append(externalTools, tool)
+			}
+		}
+		config.AllowedTools = externalTools
 	}
 }
 
@@ -275,11 +308,15 @@ func (c *WeKnoraClient) createSession(ctx context.Context, login weKnoraLogin, c
 	return response.Data.ID, nil
 }
 
-func (c *WeKnoraClient) streamAgentAnswer(ctx context.Context, login weKnoraLogin, sessionID, question string, knowledgeBases []string) error {
-	body, err := json.Marshal(map[string]any{
+func (c *WeKnoraClient) streamAgentAnswer(ctx context.Context, login weKnoraLogin, sessionID, question string, knowledgeBases []string, useExternalLive bool) error {
+	payload := map[string]any{
 		"query": question, "agent_enabled": true, "agent_id": c.config.AgentID,
-		"knowledge_base_ids": knowledgeBases, "channel": "web",
-	})
+		"web_search_enabled": useExternalLive, "channel": "web",
+	}
+	if len(knowledgeBases) > 0 {
+		payload["knowledge_base_ids"] = knowledgeBases
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -317,14 +354,40 @@ func (c *WeKnoraClient) loadAnswer(ctx context.Context, login weKnoraLogin, sess
 		if message.Role != "assistant" || !message.Completed {
 			continue
 		}
-		answer := WeKnoraAnswer{Conclusion: message.Content, ToolCalls: toolCallsFromAgentSteps(message.AgentSteps)}
+		conclusion, taggedCitations := formatInternalKnowledgeTags(message.Content)
+		answer := WeKnoraAnswer{Conclusion: conclusion, Citations: taggedCitations, ToolCalls: toolCallsFromAgentSteps(message.AgentSteps)}
 		for _, reference := range message.References {
 			title := firstNonEmpty(reference.KnowledgeTitle, reference.KnowledgeFile, reference.ID, reference.KnowledgeID)
-			answer.Citations = append(answer.Citations, ResearchCitation{ID: firstNonEmpty(reference.ID, reference.KnowledgeID), Title: title, URL: reference.Metadata.URL})
+			answer.Citations = appendUniqueCitation(answer.Citations, ResearchCitation{ID: firstNonEmpty(reference.ID, reference.KnowledgeID), Title: title, URL: reference.Metadata.URL, Source: "internal"})
 		}
 		return answer, nil
 	}
 	return WeKnoraAnswer{}, fmt.Errorf("WeKnora returned no completed assistant answer")
+}
+
+func formatInternalKnowledgeTags(content string) (string, []ResearchCitation) {
+	citations := make([]ResearchCitation, 0)
+	formatted := knowledgeTagPattern.ReplaceAllStringFunc(content, func(tag string) string {
+		attributes := map[string]string{}
+		for _, match := range knowledgeTagAttributePattern.FindAllStringSubmatch(tag, -1) {
+			attributes[match[1]] = match[2]
+		}
+		title := firstNonEmpty(attributes["doc"], attributes["title"], "机构内部资料")
+		citations = appendUniqueCitation(citations, ResearchCitation{
+			ID: firstNonEmpty(attributes["chunk_id"], attributes["kb_id"], title), Title: title, Source: "internal", ChunkID: attributes["chunk_id"],
+		})
+		return "〔内部资料〕"
+	})
+	return strings.TrimSpace(formatted), citations
+}
+
+func appendUniqueCitation(citations []ResearchCitation, next ResearchCitation) []ResearchCitation {
+	for _, citation := range citations {
+		if citation.ID == next.ID && citation.Title == next.Title {
+			return citations
+		}
+	}
+	return append(citations, next)
 }
 
 func toolCallsFromAgentSteps(steps []weKnoraAgentStep) []ResearchToolCall {

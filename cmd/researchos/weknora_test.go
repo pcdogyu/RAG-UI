@@ -57,3 +57,45 @@ func TestAskReturnsToolCallHistoryWithoutSecrets(t *testing.T) {
 		t.Fatalf("tool history leaked sensitive request data: %s", encoded)
 	}
 }
+
+func TestResearchScopeBoundaries(t *testing.T) {
+	base := agentConfig{KnowledgeBases: []string{"kb-1"}, AllowedTools: []string{"knowledge_search", "grep_chunks", "web_search"}}
+	cases := []struct {
+		scope         string
+		knowledgeBase int
+		allowedTools  []string
+		externalLive  bool
+	}{
+		{scope: "仅内部", knowledgeBase: 1, allowedTools: []string{"knowledge_search", "grep_chunks", "web_search"}},
+		{scope: "内部 + 实时", knowledgeBase: 1, allowedTools: []string{"knowledge_search", "grep_chunks", "web_search"}, externalLive: true},
+		{scope: "实时", knowledgeBase: 0, allowedTools: []string{"web_search"}, externalLive: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.scope, func(t *testing.T) {
+			policy, err := researchScopeFor(testCase.scope)
+			if err != nil {
+				t.Fatalf("researchScopeFor() error = %v", err)
+			}
+			config := base
+			config.KnowledgeBases = append([]string(nil), base.KnowledgeBases...)
+			config.AllowedTools = append([]string(nil), base.AllowedTools...)
+			applyResearchScope(&config, policy)
+			if len(config.KnowledgeBases) != testCase.knowledgeBase || policy.UseExternalLive != testCase.externalLive {
+				t.Fatalf("scope %s applied wrong knowledge boundary: %+v, %+v", testCase.scope, policy, config)
+			}
+			if strings.Join(config.AllowedTools, ",") != strings.Join(testCase.allowedTools, ",") {
+				t.Fatalf("scope %s tools = %v, want %v", testCase.scope, config.AllowedTools, testCase.allowedTools)
+			}
+		})
+	}
+}
+
+func TestFormatInternalKnowledgeTags(t *testing.T) {
+	content, citations := formatInternalKnowledgeTags(`结论来自 <kb doc="机构周报.pdf" chunk_id="chunk-12345678" kb_id="kb-1" />，请结合后续数据判断。`)
+	if strings.Contains(content, "<kb") || !strings.Contains(content, "〔内部资料〕") {
+		t.Fatalf("content = %q", content)
+	}
+	if len(citations) != 1 || citations[0].Title != "机构周报.pdf" || citations[0].ChunkID != "chunk-12345678" || citations[0].Source != "internal" {
+		t.Fatalf("citations = %+v", citations)
+	}
+}
