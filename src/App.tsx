@@ -4,6 +4,7 @@ import { CandlestickChart, ScatterChart } from 'echarts/charts'
 import { DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { navGroups, reports, type Report } from './data'
+import { renderResearchAnswerHtml } from './researchAnswerHtml'
 
 echarts.use([CandlestickChart, ScatterChart, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
@@ -105,7 +106,7 @@ function AskPage() {
     {answer && !isLoading && <Card className="answer-card">
       <div className="answer-top"><div><Pill tone="violet">{answerScope}</Pill><span className="temporal">{answerSource}</span></div></div>
       <div className="question-label">{answeredQuestion}</div>
-      <div className="answer-content"><h4>研究回答</h4><p>{answer}</p></div>
+      <div className="answer-content"><h4>研究回答</h4><div className="answer-html" dangerouslySetInnerHTML={{ __html: renderResearchAnswerHtml(answer) }} /></div>
       <section className="citations"><span>检索引用</span>{citations.length ? <div className="citation-groups">{internalCitations.length > 0 && <div className="internal-citations"><label>内部知识库</label>{internalCitations.map((citation, index) => <article className="internal-citation" key={`${citation.id}-${index}`}><span>▣</span><div><b>{citation.title}</b>{citation.chunk_id && <small>片段 {citation.chunk_id.slice(0, 8)}</small>}</div></article>)}</div>}{externalCitations.length > 0 && <div className="external-citations"><label>外部实时来源</label>{externalCitations.map((citation, index) => citation.url ? <a key={`${citation.id}-${index}`} href={citation.url} target="_blank" rel="noreferrer">{citation.title} ↗</a> : <span className="citation-chip" key={`${citation.id}-${index}`}>{citation.title}</span>)}</div>}</div> : <span className="no-citation">本次回答未返回可展示的引用。</span>}</section>
       <details className="tool-history" open>
         <summary>工具调用历史 <span>{toolCalls.length} 步</span></summary>
