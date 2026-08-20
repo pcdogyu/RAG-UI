@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -60,10 +61,23 @@ func versionHandler(w http.ResponseWriter, _ *http.Request) {
 func main() {
 	mux := http.NewServeMux()
 	weKnora := NewWeKnoraClient(loadWeKnoraConfig())
+	liquidationStore, err := openLiquidationStore(context.Background(), os.Getenv("RAG_UI_DATABASE_URL"))
+	if err != nil {
+		log.Printf("liquidation database disabled: %v", err)
+	}
+	if liquidationStore != nil {
+		defer liquidationStore.Close()
+	}
+	liquidations := newLiquidationService(liquidationStore)
+	liquidations.start(context.Background())
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "research-os"})
 	})
 	mux.HandleFunc("GET /api/v1/version", versionHandler)
+	mux.HandleFunc("GET /api/v1/liquidations/symbols", liquidations.serveSymbols)
+	mux.HandleFunc("GET /api/v1/liquidations/status", liquidations.serveStatus)
+	mux.HandleFunc("GET /api/v1/liquidations/chart", liquidations.serveChart)
+	mux.HandleFunc("GET /api/v1/liquidations/stream", liquidations.serveLiveWS)
 	mux.HandleFunc("GET /api/v1/research/reports", func(w http.ResponseWriter, _ *http.Request) {
 		// TODO(weknora): 由知识库检索与机构语义库组合查询替换。
 		writeJSON(w, http.StatusOK, []report{
