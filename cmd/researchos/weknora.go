@@ -117,7 +117,7 @@ type ResearchCitation struct {
 	URL   string `json:"url,omitempty"`
 }
 
-func (c *WeKnoraClient) Ask(ctx context.Context, question, scope string) (WeKnoraAnswer, error) {
+func (c *WeKnoraClient) Ask(ctx context.Context, question string) (WeKnoraAnswer, error) {
 	if !c.config.enabled() {
 		return WeKnoraAnswer{}, fmt.Errorf("WeKnora is not configured")
 	}
@@ -143,25 +143,10 @@ func (c *WeKnoraClient) Ask(ctx context.Context, question, scope string) (WeKnor
 	if err != nil {
 		return WeKnoraAnswer{}, err
 	}
-	if err := c.streamAgentAnswer(ctx, login, sessionID, scopedQuestion(question, scope), config.KnowledgeBases); err != nil {
+	if err := c.streamAgentAnswer(ctx, login, sessionID, question, config.KnowledgeBases); err != nil {
 		return WeKnoraAnswer{}, err
 	}
 	return c.loadAnswer(ctx, login, sessionID)
-}
-
-// scopedQuestion turns the page's retrieval mode into an explicit request for
-// the WeKnora agent. The original question remains intact for display/audit.
-func scopedQuestion(question, scope string) string {
-	switch scope {
-	case "仅内部":
-		return "请仅使用机构内部研究记忆回答，不调用实时或联网数据。\n\n问题：" + question
-	case "内部 + 实时":
-		return "请结合机构内部研究记忆与必要的实时市场数据回答，并分别标注来源与时间。\n\n问题：" + question
-	case "仅原始来源":
-		return "请只使用实时数据、原始来源或联网检索回答，不以历史研究结论作为事实依据。\n\n问题：" + question
-	default:
-		return question
-	}
 }
 
 func (c *WeKnoraClient) login(ctx context.Context) (weKnoraLogin, error) {

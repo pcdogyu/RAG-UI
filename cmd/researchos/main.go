@@ -3,7 +3,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -35,15 +34,6 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func main() {
 	mux := http.NewServeMux()
 	weKnora := NewWeKnoraClient(loadWeKnoraConfig())
-	liquidationStore, err := openLiquidationStore(context.Background(), os.Getenv("RAG_UI_DATABASE_URL"))
-	if err != nil {
-		log.Printf("liquidation database disabled: %v", err)
-	}
-	if liquidationStore != nil {
-		defer liquidationStore.Close()
-	}
-	liquidations := newLiquidationService(liquidationStore)
-	liquidations.start(context.Background())
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "research-os"})
 	})
@@ -60,7 +50,7 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "question is required"})
 			return
 		}
-		answer, err := weKnora.Ask(r.Context(), request.Question, request.Scope)
+		answer, err := weKnora.Ask(r.Context(), request.Question)
 		if err != nil {
 			if !weKnora.config.enabled() {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "WeKnora is not configured; set WEKNORA_EMAIL and WEKNORA_PASSWORD"})
@@ -76,10 +66,6 @@ func main() {
 			"source": "weknora-agent",
 		})
 	})
-	mux.HandleFunc("GET /api/v1/liquidations/symbols", liquidations.serveSymbols)
-	mux.HandleFunc("GET /api/v1/liquidations/status", liquidations.serveStatus)
-	mux.HandleFunc("GET /api/v1/liquidations/chart", liquidations.serveChart)
-	mux.HandleFunc("GET /api/v1/liquidations/stream", liquidations.serveLiveWS)
 
 	// 开发时由 Vite 提供页面；构建后 Go 可独立托管 dist 目录。
 	dist := filepath.Join("dist")
