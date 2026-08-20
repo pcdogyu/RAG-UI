@@ -44,8 +44,20 @@ $env:WEKNORA_AGENT_ID = '30a2f66f-7650-4cb0-a6f8-e64981b8a95d'
 $env:WEKNORA_KNOWLEDGE_BASE_ID = '1006a6d7-5baa-42e0-b0c7-ed7908dbe507'
 ```
 
+爆仓气泡图使用 Binance、OKX 的公开行情 WebSocket，不需要交易 API Key。生产环境需为持久化数据配置一个最小权限 PostgreSQL 账号，并仅在部署环境中设置 DSN：
+
+```powershell
+$env:RAG_UI_DATABASE_URL = 'postgres://rag_ui_app:password@db-host:5432/RAG-UI?sslmode=disable'
+# 可选：共同上架的 USDT 永续合约数量与保留时长（默认 50、7 天）
+$env:LIQUIDATION_SYMBOL_LIMIT = '50'
+$env:LIQUIDATION_RETENTION_HOURS = '168'
+```
+
+未设置 `RAG_UI_DATABASE_URL` 时，服务仍可启动，但爆仓气泡图会显示数据库不可用状态且不会伪造历史数据。
+
 ## WeKnora 接入点
 
 - `GET /api/v1/research/reports`：研究记忆页的演示数据接口，后续可对接机构语义库。
 - `POST /api/v1/research/ask`：登录 WeKnora、读取 HYGR投研工作台配置、创建会话、消费 SSE 响应，再返回完整回答与引用；页面的“仅内部 / 内部 + 实时 / 仅原始来源”会作为明确的检索指令传入智能体。
 - 智能问答在 WeKnora 未配置或故障时会明确报错，不会把演示内容伪装成生产研究结果。
+- `GET /api/v1/liquidations/symbols`、`/status`、`/chart` 和 `/stream`：爆仓气泡图的只读目录、采集状态、历史快照与浏览器实时推送接口。

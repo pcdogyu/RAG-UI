@@ -144,7 +144,7 @@ func (s *liquidationStore) chart(ctx context.Context, symbol string, since time.
 		return nil, nil, time.Time{}, err
 	}
 	defer candleRows.Close()
-	var candles []candle
+	candles := make([]candle, 0)
 	for candleRows.Next() {
 		var item candle
 		if err := candleRows.Scan(&item.Symbol, &item.Interval, &item.OpenTime, &item.Open, &item.High, &item.Low, &item.Close, &item.Volume); err != nil {
@@ -170,7 +170,7 @@ func (s *liquidationStore) chart(ctx context.Context, symbol string, since time.
 		return nil, nil, time.Time{}, err
 	}
 	defer rows.Close()
-	var events []liquidationEvent
+	events := make([]liquidationEvent, 0)
 	for rows.Next() {
 		var item liquidationEvent
 		if err := rows.Scan(&item.Exchange, &item.Symbol, &item.Occurred, &item.Side, &item.Price, &item.Quantity, &item.Notional); err != nil {
@@ -810,9 +810,13 @@ func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid exchanges"})
 		return
 	}
+	minimumCandles := int(time.Since(since) / (5 * time.Minute) * 3 / 4)
+	if minimumCandles < 1 {
+		minimumCandles = 1
+	}
 	if count, err := s.store.candleCount(r.Context(), symbol, since); err != nil {
 		log.Printf("liquidation candle count: %v", err)
-	} else if count == 0 {
+	} else if count < minimumCandles {
 		if err := s.backfillCandles(r.Context(), symbol, since); err != nil {
 			log.Printf("liquidation candle backfill: %v", err)
 		}
@@ -823,7 +827,11 @@ func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to load liquidation chart"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"symbol": symbol, "range": window, "collectionStartedAt": collectionStart, "candles": candles, "events": events, "status": s.statusSnapshot()})
+	var collectionStartedAt any
+	if !collectionStart.IsZero() {
+		collectionStartedAt = collectionStart
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"symbol": symbol, "range": window, "collectionStartedAt": collectionStartedAt, "candles": candles, "events": events, "status": s.statusSnapshot()})
 }
 
 func (s *liquidationService) serveLiveWS(w http.ResponseWriter, r *http.Request) {
