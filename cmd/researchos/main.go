@@ -50,7 +50,7 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "question is required"})
 			return
 		}
-		answer, err := weKnora.Ask(r.Context(), request.Question)
+		answer, err := weKnora.Ask(r.Context(), request.Question, request.Scope)
 		if err != nil {
 			if !weKnora.config.enabled() {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "WeKnora is not configured; set WEKNORA_EMAIL and WEKNORA_PASSWORD"})
