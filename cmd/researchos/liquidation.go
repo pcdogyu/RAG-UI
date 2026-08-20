@@ -64,7 +64,8 @@ type exchangeStatus struct {
 	LastEvent         time.Time `json:"lastEvent,omitempty"`
 	LastDirectEvent   time.Time `json:"lastDirectEvent,omitempty"`
 	LastFallbackEvent time.Time `json:"lastFallbackEvent,omitempty"`
-	LastMessage       time.Time `json:"lastMessage,omitempty"`
+	LastRawMessage    time.Time `json:"lastRawMessage,omitempty"`
+	LastParseError    string    `json:"lastParseError,omitempty"`
 	Error             string    `json:"error,omitempty"`
 }
 
@@ -312,10 +313,10 @@ func (s *liquidationService) setDirectStatus(exchange string, connected bool, er
 	s.statuses[exchange] = status
 }
 
-func (s *liquidationService) markDirectMessage(exchange string) {
+func (s *liquidationService) markDirectRawMessage(exchange string) {
 	s.mu.Lock()
 	status := s.statuses[exchange]
-	status.LastMessage = time.Now().UTC()
+	status.LastRawMessage = time.Now().UTC()
 	s.statuses[exchange] = status
 	s.mu.Unlock()
 }
@@ -323,7 +324,7 @@ func (s *liquidationService) markDirectMessage(exchange string) {
 func (s *liquidationService) recordDirectParseError(exchange string, err error) {
 	s.mu.Lock()
 	status := s.statuses[exchange]
-	status.Error = err.Error()
+	status.LastParseError = err.Error()
 	s.statuses[exchange] = status
 	s.mu.Unlock()
 }
@@ -669,7 +670,7 @@ func (s *liquidationService) runBinance(ctx context.Context) error {
 		if err := wsjson.Read(ctx, conn, &raw); err != nil {
 			return err
 		}
-		s.markDirectMessage("binance")
+		s.markDirectRawMessage("binance")
 		for _, event := range s.normalizeBinanceForceOrders(raw) {
 			s.handleEvent(ctx, event, "direct")
 		}
@@ -764,7 +765,7 @@ func (s *liquidationService) runOKX(ctx context.Context) error {
 		if err := wsjson.Read(ctx, conn, &message); err != nil {
 			return err
 		}
-		s.markDirectMessage("okx")
+		s.markDirectRawMessage("okx")
 		if message.Arg.Channel == "candle5m" {
 			for _, raw := range message.Data {
 				if item, ok := s.normalizeOKXCandle(message.Arg.InstID, raw); ok && s.store != nil {

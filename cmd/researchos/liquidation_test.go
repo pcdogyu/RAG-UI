@@ -89,6 +89,22 @@ func TestFallbackSyncReadsPagesUntilWindowBoundary(t *testing.T) {
 	}
 }
 
+func TestDirectStatusSeparatesRawFramesAndParseErrors(t *testing.T) {
+	service := testLiquidationService()
+	service.markDirectRawMessage("binance")
+	service.recordDirectParseError("binance", context.DeadlineExceeded)
+	status := service.statusSnapshot().Exchanges["binance"]
+	if status.LastRawMessage.IsZero() {
+		t.Fatal("raw message time was not recorded")
+	}
+	if status.LastParseError != context.DeadlineExceeded.Error() {
+		t.Fatalf("parse error = %q", status.LastParseError)
+	}
+	if status.Error != "" {
+		t.Fatalf("connection error must remain separate, got %q", status.Error)
+	}
+}
+
 func TestNormalizeOKXLiquidationUsesContractValue(t *testing.T) {
 	event, ok := testLiquidationService().normalizeOKX("ETH-USDT-SWAP", "buy", 2500, 3, 1_700_000_000_000)
 	if !ok {
