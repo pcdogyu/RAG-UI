@@ -28,7 +28,7 @@ const validWatchlistJSON = `{
 }`
 
 func TestParseWatchlistBriefValidatesScenariosAndURLs(t *testing.T) {
-	payload, err := parseWatchlistBrief("```json\n" + validWatchlistJSON + "\n```")
+	payload, err := parseWatchlistBrief("```json\n" + watchlistJSONWithNewsCount(t, watchlistBriefMaxNews) + "\n```")
 	if err != nil {
 		t.Fatalf("parseWatchlistBrief() error = %v", err)
 	}
@@ -37,6 +37,24 @@ func TestParseWatchlistBriefValidatesScenariosAndURLs(t *testing.T) {
 	}
 	if payload.News[0].URL != "https://example.com/story" || payload.News[1].URL != "" {
 		t.Fatalf("unexpected URLs: %+v", payload.News)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseWatchlistBrief(string(encoded)); err != nil {
+		t.Fatalf("expected %d news items to be accepted: %v", watchlistBriefMaxNews, err)
+	}
+	if _, err := parseWatchlistBrief(watchlistJSONWithNewsCount(t, watchlistBriefMaxNews-1)); err == nil {
+		t.Fatalf("expected %d news items to be rejected", watchlistBriefMaxNews-1)
+	}
+	payload.News = append(payload.News, payload.News[0])
+	encoded, err = json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseWatchlistBrief(string(encoded)); err == nil {
+		t.Fatalf("expected %d news items to be rejected", watchlistBriefMaxNews+1)
 	}
 	if _, err := parseWatchlistBrief(`{"crypto":[],"us_equities":[],"news":[]}`); err == nil {
 		t.Fatal("expected invalid brief error")
@@ -78,7 +96,7 @@ func TestWatchlistBriefUsesRealtimeScopeAndCaches(t *testing.T) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = io.WriteString(w, "event: completed\ndata: {}\n\n")
 		case "/api/v1/messages/session-1/load":
-			_, _ = io.WriteString(w, `{"data":[{"role":"assistant","content":`+strconvQuote(validWatchlistJSON)+`,"is_completed":true}]}`)
+			_, _ = io.WriteString(w, `{"data":[{"role":"assistant","content":`+strconvQuote(watchlistJSONWithNewsCount(t, watchlistBriefMaxNews))+`,"is_completed":true}]}`)
 		default:
 			t.Fatalf("unexpected request: %s", r.URL.Path)
 		}
@@ -87,7 +105,7 @@ func TestWatchlistBriefUsesRealtimeScopeAndCaches(t *testing.T) {
 
 	service := newWatchlistBriefService(NewWeKnoraClient(WeKnoraConfig{BaseURL: server.URL, Email: "researcher@example.com", Password: "super-secret", AgentID: "agent-1", KnowledgeBaseID: "kb-internal"}))
 	first, err := service.Brief(context.Background(), false)
-	if err != nil || first.Cached || len(first.News) != 2 {
+	if err != nil || first.Cached || len(first.News) != watchlistBriefMaxNews {
 		t.Fatalf("first brief = %+v, %v", first, err)
 	}
 	second, err := service.Brief(context.Background(), false)
@@ -115,5 +133,22 @@ func TestWatchlistBriefHandlerErrors(t *testing.T) {
 
 func strconvQuote(value string) string {
 	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func watchlistJSONWithNewsCount(t *testing.T, count int) string {
+	t.Helper()
+	var payload watchlistBriefPayload
+	if err := json.Unmarshal([]byte(validWatchlistJSON), &payload); err != nil {
+		t.Fatalf("unmarshal valid watchlist JSON: %v", err)
+	}
+	for len(payload.News) < count {
+		payload.News = append(payload.News, payload.News[0])
+	}
+	payload.News = payload.News[:count]
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal watchlist JSON with %d news items: %v", count, err)
+	}
 	return string(encoded)
 }

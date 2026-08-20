@@ -13,6 +13,7 @@ import (
 )
 
 const watchlistBriefCacheTTL = 15 * time.Minute
+const watchlistBriefMaxNews = 10
 
 const watchlistBriefPrompt = `你是机构研究工作台的实时市场简报编辑。只使用刚刚检索到的外部实时资料、新闻原始来源与已授权外部工具；严禁调用、引用或基于任何内部知识库内容推断。
 
@@ -24,7 +25,7 @@ const watchlistBriefPrompt = `你是机构研究工作台的实时市场简报�
 }
 要求：
 1. 每个 Bull/Base/Bear 情景必须具体说明触发条件或观察点，且不构成投资建议。
-2. news 仅保留 1 至 8 条重大、最新且与 Crypto、美股或宏观传导相关的新闻；按影响与新近程度排序。
+2. news 必须返回恰好 10 条重大、最新且与 Crypto、美股或宏观传导相关的新闻；按影响与新近程度排序。若无法验证 10 条不同新闻，请明确说明无法完成，不要用占位或虚构内容补齐。
 3. 每条 news 必须有 source 和 published_at；只有确认的 http/https 原文链接才填写 url，否则 url 留空。
 4. 不得编造数字、新闻、链接或发布时间；无法确认的信息不应写入。`
 
@@ -138,8 +139,8 @@ func parseWatchlistBrief(content string) (watchlistBriefPayload, error) {
 	if err := validateWatchlistScenarios("us_equities", payload.USEquities); err != nil {
 		return watchlistBriefPayload{}, err
 	}
-	if len(payload.News) == 0 || len(payload.News) > 8 {
-		return watchlistBriefPayload{}, errors.New("重大新闻数量必须在 1 到 8 条之间")
+	if len(payload.News) != watchlistBriefMaxNews {
+		return watchlistBriefPayload{}, fmt.Errorf("重大新闻数量必须为 %d 条", watchlistBriefMaxNews)
 	}
 	for index := range payload.News {
 		item := &payload.News[index]
