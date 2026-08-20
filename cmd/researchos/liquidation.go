@@ -24,6 +24,9 @@ import (
 const (
 	liquidationRetention = 7 * 24 * time.Hour
 	defaultSymbolLimit   = 50
+	fallbackPollInterval = 5 * time.Second
+	fallbackBackfillAge  = 24 * time.Hour
+	defaultFallbackURL   = "http://10.15.0.6"
 )
 
 type liquidationEvent struct {
@@ -57,14 +60,24 @@ type marketSymbol struct {
 }
 
 type exchangeStatus struct {
-	Connected bool      `json:"connected"`
-	LastEvent time.Time `json:"lastEvent,omitempty"`
-	Error     string    `json:"error,omitempty"`
+	Connected         bool      `json:"connected"`
+	LastEvent         time.Time `json:"lastEvent,omitempty"`
+	LastDirectEvent   time.Time `json:"lastDirectEvent,omitempty"`
+	LastFallbackEvent time.Time `json:"lastFallbackEvent,omitempty"`
+	LastMessage       time.Time `json:"lastMessage,omitempty"`
+	Error             string    `json:"error,omitempty"`
+}
+
+type fallbackStatus struct {
+	Enabled     bool      `json:"enabled"`
+	LastSuccess time.Time `json:"lastSuccess,omitempty"`
+	Error       string    `json:"error,omitempty"`
 }
 
 type liquidationStatus struct {
 	Database  bool                      `json:"database"`
 	Exchanges map[string]exchangeStatus `json:"exchanges"`
+	Fallback  fallbackStatus            `json:"fallback"`
 }
 
 type liquidationStore struct{ db *sql.DB }
@@ -208,19 +221,21 @@ type liquidationSubscriber struct {
 type liquidationService struct {
 	store       *liquidationStore
 	client      *http.Client
+	fallbackURL string
 	mu          sync.RWMutex
 	symbols     []marketSymbol
 	byBinance   map[string]marketSymbol
 	byOKX       map[string]marketSymbol
 	statuses    map[string]exchangeStatus
+	fallback    fallbackStatus
 	subscribers map[*liquidationSubscriber]struct{}
 }
 
 func newLiquidationService(store *liquidationStore) *liquidationService {
 	service := &liquidationService{
-		store: store, client: &http.Client{Timeout: 15 * time.Second},
+		store: store, client: &http.Client{Timeout: 15 * time.Second}, fallbackURL: fallbackURL(),
 		byBinance: map[string]marketSymbol{}, byOKX: map[string]marketSymbol{},
-		statuses: map[string]exchangeStatus{"binance": {}, "okx": {}}, subscribers: map[*liquidationSubscriber]struct{}{},
+		statuses: map[string]exchangeStatus{"binance": {}, "okx": {}}, fallback: fallbackStatus{Enabled: true}, subscribers: map[*liquidationSubscriber]struct{}{},
 	}
 	// ETH is immediately usable while the first public instrument scan runs.
 	seed := marketSymbol{Symbol: "ETH-USDT", BinanceSymbol: "ETHUSDT", OKXInstrumentID: "ETH-USDT-SWAP", OKXContractValue: 0.01}
@@ -235,6 +250,7 @@ func (s *liquidationService) start(ctx context.Context) {
 	go s.binanceLoop(ctx)
 	go s.okxLoop(ctx)
 	if s.store != nil {
+		go s.fallbackLoop(ctx)
 		retention := retentionDuration()
 		go func() {
 			ticker := time.NewTicker(time.Hour)
@@ -280,10 +296,10 @@ func (s *liquidationService) statusSnapshot() liquidationStatus {
 	for key, value := range s.statuses {
 		statuses[key] = value
 	}
-	return liquidationStatus{Database: s.store != nil, Exchanges: statuses}
+	return liquidationStatus{Database: s.store != nil, Exchanges: statuses, Fallback: s.fallback}
 }
 
-func (s *liquidationService) setStatus(exchange string, connected bool, err error) {
+func (s *liquidationService) setDirectStatus(exchange string, connected bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	status := s.statuses[exchange]
@@ -294,6 +310,33 @@ func (s *liquidationService) setStatus(exchange string, connected bool, err erro
 		status.Error = ""
 	}
 	s.statuses[exchange] = status
+}
+
+func (s *liquidationService) markDirectMessage(exchange string) {
+	s.mu.Lock()
+	status := s.statuses[exchange]
+	status.LastMessage = time.Now().UTC()
+	s.statuses[exchange] = status
+	s.mu.Unlock()
+}
+
+func (s *liquidationService) recordDirectParseError(exchange string, err error) {
+	s.mu.Lock()
+	status := s.statuses[exchange]
+	status.Error = err.Error()
+	s.statuses[exchange] = status
+	s.mu.Unlock()
+}
+
+func (s *liquidationService) setFallbackStatus(success bool, err error) {
+	s.mu.Lock()
+	if success {
+		s.fallback.LastSuccess = time.Now().UTC()
+		s.fallback.Error = ""
+	} else if err != nil {
+		s.fallback.Error = err.Error()
+	}
+	s.mu.Unlock()
 }
 
 func (s *liquidationService) refreshUniverse(ctx context.Context) error {
@@ -431,8 +474,107 @@ func (s *liquidationService) getJSON(ctx context.Context, endpoint string, resul
 	return json.NewDecoder(response.Body).Decode(result)
 }
 
-// backfillCandles fills price history only. Liquidation events are intentionally
-// never backfilled: the chart must not claim public WS events from before this service ran.
+type fallbackLiquidationRow struct {
+	Exchange string  `json:"exchange"`
+	Symbol   string  `json:"symbol"`
+	Side     string  `json:"side"`
+	Price    float64 `json:"price"`
+	Quantity float64 `json:"qty"`
+	Notional float64 `json:"notional_usd"`
+	EventTS  int64   `json:"event_ts"`
+}
+
+type fallbackLiquidationResponse struct {
+	Rows []fallbackLiquidationRow `json:"rows"`
+}
+
+func fallbackURL() string {
+	if value := strings.TrimRight(strings.TrimSpace(os.Getenv("LIQUIDATION_FALLBACK_URL")), "/"); value != "" {
+		return value
+	}
+	return defaultFallbackURL
+}
+
+func (s *liquidationService) fallbackLoop(ctx context.Context) {
+	if err := s.refreshUniverse(ctx); err != nil {
+		log.Printf("liquidation fallback universe: %v", err)
+	}
+	since := time.Now().UTC().Add(-fallbackBackfillAge)
+	if err := s.syncFallback(ctx, since); err != nil {
+		s.setFallbackStatus(false, err)
+		log.Printf("liquidation fallback backfill: %v", err)
+	}
+	ticker := time.NewTicker(fallbackPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.syncFallback(ctx, time.Now().UTC().Add(-2*time.Minute)); err != nil {
+				s.setFallbackStatus(false, err)
+				log.Printf("liquidation fallback poll: %v", err)
+			}
+		}
+	}
+}
+
+func (s *liquidationService) syncFallback(ctx context.Context, since time.Time) error {
+	endpoint := s.fallbackURL + "/api/liquidations"
+	for page := 1; page <= 200; page++ {
+		query := url.Values{"symbol": {"ALL"}, "page": {strconv.Itoa(page)}, "limit": {"1000"}, "filter_field": {"notional_usd"}, "min_value": {"0"}}
+		var response fallbackLiquidationResponse
+		if err := s.getJSON(ctx, endpoint+"?"+query.Encode(), &response); err != nil {
+			return err
+		}
+		if len(response.Rows) == 0 {
+			s.setFallbackStatus(true, nil)
+			return nil
+		}
+		oldest := time.Now().UTC()
+		for _, row := range response.Rows {
+			occurred := time.UnixMilli(row.EventTS).UTC()
+			if occurred.Before(oldest) {
+				oldest = occurred
+			}
+			if occurred.Before(since) {
+				continue
+			}
+			if event, ok := s.normalizeFallback(row); ok {
+				s.handleEvent(ctx, event, "fallback")
+			}
+		}
+		if oldest.Before(since) || oldest.Equal(since) || len(response.Rows) < 1000 {
+			s.setFallbackStatus(true, nil)
+			return nil
+		}
+	}
+	return fmt.Errorf("fallback page limit reached before %s", since.Format(time.RFC3339))
+}
+
+func (s *liquidationService) normalizeFallback(row fallbackLiquidationRow) (liquidationEvent, bool) {
+	exchange := strings.ToLower(strings.TrimSpace(row.Exchange))
+	if exchange != "binance" && exchange != "okx" {
+		return liquidationEvent{}, false
+	}
+	rawSymbol := strings.ReplaceAll(strings.ToUpper(strings.TrimSpace(row.Symbol)), "-", "")
+	s.mu.RLock()
+	symbol, exists := s.byBinance[rawSymbol]
+	s.mu.RUnlock()
+	side := strings.ToLower(strings.TrimSpace(row.Side))
+	if !exists || (side != "long" && side != "short") || row.Price <= 0 || row.Quantity <= 0 || row.EventTS <= 0 {
+		return liquidationEvent{}, false
+	}
+	occurred := time.UnixMilli(row.EventTS).UTC()
+	notional := row.Notional
+	if notional <= 0 {
+		notional = row.Price * row.Quantity
+	}
+	return liquidationEvent{Exchange: exchange, Symbol: symbol.Symbol, Occurred: occurred, Side: side, Price: row.Price, Quantity: row.Quantity, Notional: notional, DedupKey: liquidationDedupKey(exchange, symbol.Symbol, occurred, row.Price, row.Quantity)}, true
+}
+
+// backfillCandles fills price history from OKX; liquidation history is backfilled separately
+// from the designated fallback collector with its original exchange timestamps preserved.
 func (s *liquidationService) backfillCandles(ctx context.Context, canonicalSymbol string, since time.Time) error {
 	if s.store == nil {
 		return nil
@@ -500,7 +642,7 @@ func (s *liquidationService) binanceLoop(ctx context.Context) {
 			}
 		}
 		err := s.runBinance(ctx)
-		s.setStatus("binance", false, err)
+		s.setDirectStatus("binance", false, err)
 		if err != nil {
 			log.Printf("binance liquidation stream: %v", err)
 		}
@@ -513,38 +655,62 @@ func (s *liquidationService) binanceLoop(ctx context.Context) {
 }
 
 func (s *liquidationService) runBinance(ctx context.Context) error {
-	conn, _, err := websocket.Dial(ctx, "wss://fstream.binance.com/ws", nil)
+	conn, _, err := websocket.Dial(ctx, "wss://fstream.binance.com/ws/!forceOrder@arr", nil)
 	if err != nil {
 		return err
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	args := make([]string, 0)
-	for _, symbol := range s.symbolsSnapshot() {
-		args = append(args, strings.ToLower(symbol.BinanceSymbol)+"@forceOrder")
-	}
-	if err := wsjson.Write(ctx, conn, map[string]any{"method": "SUBSCRIBE", "params": args, "id": 1}); err != nil {
-		return err
-	}
-	s.setStatus("binance", true, nil)
+	s.setDirectStatus("binance", true, nil)
 	for {
-		var message struct {
-			EventTime int64 `json:"E"`
-			Order     struct {
-				Symbol         string `json:"s"`
-				Side           string `json:"S"`
-				AveragePrice   string `json:"ap"`
-				FilledQuantity string `json:"z"`
-				TradeTime      int64  `json:"T"`
-			} `json:"o"`
-		}
-		if err := wsjson.Read(ctx, conn, &message); err != nil {
+		var raw json.RawMessage
+		if err := wsjson.Read(ctx, conn, &raw); err != nil {
 			return err
 		}
-		event, ok := s.normalizeBinance(message.Order.Symbol, message.Order.Side, message.Order.AveragePrice, message.Order.FilledQuantity, message.Order.TradeTime)
-		if ok {
-			s.handleEvent(ctx, event)
+		s.markDirectMessage("binance")
+		for _, event := range s.normalizeBinanceForceOrders(raw) {
+			s.handleEvent(ctx, event, "direct")
 		}
 	}
+}
+
+type binanceForceOrder struct {
+	Order struct {
+		Symbol         string `json:"s"`
+		Side           string `json:"S"`
+		AveragePrice   string `json:"ap"`
+		FilledQuantity string `json:"z"`
+		TradeTime      int64  `json:"T"`
+	} `json:"o"`
+	Data json.RawMessage `json:"data"`
+}
+
+func (s *liquidationService) normalizeBinanceForceOrders(raw json.RawMessage) []liquidationEvent {
+	var batch []binanceForceOrder
+	if len(raw) > 0 && raw[0] == '[' {
+		if err := json.Unmarshal(raw, &batch); err != nil {
+			s.recordDirectParseError("binance", err)
+			log.Printf("decode binance liquidation batch: %v", err)
+			return nil
+		}
+	} else {
+		var item binanceForceOrder
+		if err := json.Unmarshal(raw, &item); err != nil {
+			s.recordDirectParseError("binance", err)
+			log.Printf("decode binance liquidation message: %v", err)
+			return nil
+		}
+		if len(item.Data) > 0 {
+			return s.normalizeBinanceForceOrders(item.Data)
+		}
+		batch = []binanceForceOrder{item}
+	}
+	events := make([]liquidationEvent, 0, len(batch))
+	for _, item := range batch {
+		if event, ok := s.normalizeBinance(item.Order.Symbol, item.Order.Side, item.Order.AveragePrice, item.Order.FilledQuantity, item.Order.TradeTime); ok {
+			events = append(events, event)
+		}
+	}
+	return events
 }
 
 func (s *liquidationService) okxLoop(ctx context.Context) {
@@ -558,7 +724,7 @@ func (s *liquidationService) okxLoop(ctx context.Context) {
 			}
 		}
 		err := s.runOKX(ctx)
-		s.setStatus("okx", false, err)
+		s.setDirectStatus("okx", false, err)
 		if err != nil {
 			log.Printf("okx liquidation stream: %v", err)
 		}
@@ -583,7 +749,7 @@ func (s *liquidationService) runOKX(ctx context.Context) error {
 	if err := wsjson.Write(ctx, conn, map[string]any{"op": "subscribe", "args": args}); err != nil {
 		return err
 	}
-	s.setStatus("okx", true, nil)
+	s.setDirectStatus("okx", true, nil)
 	for {
 		var message struct {
 			Arg struct {
@@ -595,6 +761,7 @@ func (s *liquidationService) runOKX(ctx context.Context) error {
 		if err := wsjson.Read(ctx, conn, &message); err != nil {
 			return err
 		}
+		s.markDirectMessage("okx")
 		if message.Arg.Channel == "candle5m" {
 			for _, raw := range message.Data {
 				if item, ok := s.normalizeOKXCandle(message.Arg.InstID, raw); ok && s.store != nil {
@@ -608,7 +775,7 @@ func (s *liquidationService) runOKX(ctx context.Context) error {
 		if message.Arg.Channel == "liquidation-orders" {
 			for _, raw := range message.Data {
 				for _, event := range s.normalizeOKXLiquidations(raw) {
-					s.handleEvent(ctx, event)
+					s.handleEvent(ctx, event, "direct")
 				}
 			}
 		}
@@ -628,7 +795,7 @@ func (s *liquidationService) normalizeBinance(rawSymbol, orderSide, priceRaw, qu
 		side = "short"
 	}
 	occurred := time.UnixMilli(timestamp).UTC()
-	return liquidationEvent{Exchange: "binance", Symbol: symbol.Symbol, Occurred: occurred, Side: side, Price: price, Quantity: quantity, Notional: price * quantity, DedupKey: fmt.Sprintf("binance:%s:%d:%s:%s", rawSymbol, timestamp, priceRaw, quantityRaw)}, true
+	return liquidationEvent{Exchange: "binance", Symbol: symbol.Symbol, Occurred: occurred, Side: side, Price: price, Quantity: quantity, Notional: price * quantity, DedupKey: liquidationDedupKey("binance", symbol.Symbol, occurred, price, quantity)}, true
 }
 
 func (s *liquidationService) normalizeOKXCandle(instID string, raw json.RawMessage) (candle, bool) {
@@ -652,6 +819,7 @@ func (s *liquidationService) normalizeOKXCandle(instID string, raw json.RawMessa
 func (s *liquidationService) normalizeOKXLiquidations(raw json.RawMessage) []liquidationEvent {
 	var envelope map[string]any
 	if json.Unmarshal(raw, &envelope) != nil {
+		s.recordDirectParseError("okx", fmt.Errorf("decode liquidation message"))
 		return nil
 	}
 	instID, _ := envelope["instId"].(string)
@@ -691,10 +859,14 @@ func (s *liquidationService) normalizeOKX(instID, orderSide string, price, quant
 	if contractValue <= 0 {
 		contractValue = 1
 	}
-	return liquidationEvent{Exchange: "okx", Symbol: symbol.Symbol, Occurred: occurred, Side: side, Price: price, Quantity: quantity, Notional: price * quantity * contractValue, DedupKey: fmt.Sprintf("okx:%s:%d:%s:%g:%g", instID, timestamp, orderSide, price, quantity)}, true
+	return liquidationEvent{Exchange: "okx", Symbol: symbol.Symbol, Occurred: occurred, Side: side, Price: price, Quantity: quantity, Notional: price * quantity * contractValue, DedupKey: liquidationDedupKey("okx", symbol.Symbol, occurred, price, quantity)}, true
 }
 
-func (s *liquidationService) handleEvent(ctx context.Context, event liquidationEvent) {
+func liquidationDedupKey(exchange, symbol string, occurred time.Time, price, quantity float64) string {
+	return fmt.Sprintf("%s:%s:%d:%s:%s", exchange, symbol, occurred.UnixMilli(), strconv.FormatFloat(price, 'g', -1, 64), strconv.FormatFloat(quantity, 'g', -1, 64))
+}
+
+func (s *liquidationService) handleEvent(ctx context.Context, event liquidationEvent, source string) {
 	if s.store == nil {
 		return
 	}
@@ -703,13 +875,26 @@ func (s *liquidationService) handleEvent(ctx context.Context, event liquidationE
 		log.Printf("save liquidation: %v", err)
 		return
 	}
-	if !inserted {
-		return
-	}
 	s.mu.Lock()
 	status := s.statuses[event.Exchange]
-	status.LastEvent = event.Occurred
+	if status.LastEvent.Before(event.Occurred) {
+		status.LastEvent = event.Occurred
+	}
+	if source == "fallback" {
+		if status.LastFallbackEvent.Before(event.Occurred) {
+			status.LastFallbackEvent = event.Occurred
+		}
+	} else {
+		if status.LastDirectEvent.Before(event.Occurred) {
+			status.LastDirectEvent = event.Occurred
+		}
+		status.Error = ""
+	}
 	s.statuses[event.Exchange] = status
+	if !inserted {
+		s.mu.Unlock()
+		return
+	}
 	for subscriber := range s.subscribers {
 		if subscriber.symbol == event.Symbol && (len(subscriber.exchanges) == 0 || subscriber.exchanges[event.Exchange]) {
 			select {

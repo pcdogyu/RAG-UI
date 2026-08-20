@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -30,6 +31,61 @@ func TestNormalizeBinanceForceOrder(t *testing.T) {
 	}
 	if event.Occurred != time.UnixMilli(1_700_000_000_000).UTC() {
 		t.Fatalf("unexpected timestamp: %s", event.Occurred)
+	}
+}
+
+func TestNormalizeBinanceAllMarketForceOrder(t *testing.T) {
+	service := testLiquidationService()
+	raw := json.RawMessage(`[{"e":"forceOrder","o":{"s":"ETHUSDT","S":"SELL","ap":"2500.5","z":"2","T":1700000000000}}]`)
+	events := service.normalizeBinanceForceOrders(raw)
+	if len(events) != 1 || events[0].Symbol != "ETH-USDT" || events[0].Side != "long" {
+		t.Fatalf("unexpected all-market events: %+v", events)
+	}
+}
+
+func TestFallbackEventMatchesDirectDedupKey(t *testing.T) {
+	service := testLiquidationService()
+	direct, ok := service.normalizeBinance("ETHUSDT", "SELL", "2500.5", "2", 1_700_000_000_000)
+	if !ok {
+		t.Fatal("expected direct event")
+	}
+	fallback, ok := service.normalizeFallback(fallbackLiquidationRow{Exchange: "binance", Symbol: "ETHUSDT", Side: "long", Price: 2500.5, Quantity: 2, Notional: 5001, EventTS: 1_700_000_000_000})
+	if !ok {
+		t.Fatal("expected fallback event")
+	}
+	if fallback.DedupKey != direct.DedupKey {
+		t.Fatalf("fallback key = %q, direct key = %q", fallback.DedupKey, direct.DedupKey)
+	}
+	if _, ok := service.normalizeFallback(fallbackLiquidationRow{Exchange: "bybit", Symbol: "ETHUSDT", Side: "long", Price: 1, Quantity: 1, EventTS: 1}); ok {
+		t.Fatal("bybit must remain out of scope")
+	}
+}
+
+func TestFallbackSyncReadsPagesUntilWindowBoundary(t *testing.T) {
+	service := testLiquidationService()
+	requestedPages := make([]string, 0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPages = append(requestedPages, r.URL.Query().Get("page"))
+		if r.URL.Query().Get("page") == "1" {
+			rows := make([]fallbackLiquidationRow, 1000)
+			for i := range rows {
+				rows[i] = fallbackLiquidationRow{Exchange: "binance", Symbol: "ETHUSDT", Side: "long", Price: 2500, Quantity: 1, EventTS: 1_700_000_100_000}
+			}
+			_ = json.NewEncoder(w).Encode(fallbackLiquidationResponse{Rows: rows})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(fallbackLiquidationResponse{Rows: []fallbackLiquidationRow{{Exchange: "binance", Symbol: "ETHUSDT", Side: "long", Price: 2500, Quantity: 1, EventTS: 1_699_999_900_000}}})
+	}))
+	defer server.Close()
+	service.fallbackURL = server.URL
+	if err := service.syncFallback(context.Background(), time.UnixMilli(1_700_000_000_000).UTC()); err != nil {
+		t.Fatalf("sync fallback: %v", err)
+	}
+	if strings.Join(requestedPages, ",") != "1,2" {
+		t.Fatalf("pages = %v, want [1 2]", requestedPages)
+	}
+	if service.statusSnapshot().Fallback.LastSuccess.IsZero() {
+		t.Fatal("fallback success was not recorded")
 	}
 }
 
