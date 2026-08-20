@@ -43,51 +43,59 @@ function BuildFooter() {
 }
 
 function AskPage() {
-  const weKnoraAgentURL = 'http://10.15.0.27/platform/agents'
   const [scope, setScope] = useState('内部 + 实时')
-  const [question, setQuestion] = useState('ETH 过去一周的核心逻辑变化是什么？')
-  const [asked, setAsked] = useState(true)
-  const [answer, setAnswer] = useState('本轮 ETH 回调以杠杆去化为主，现货贡献有限；中期研究框架暂未改变。')
+  const [question, setQuestion] = useState('')
+  const [answer, setAnswer] = useState<string | null>(null)
   const [citations, setCitations] = useState<{ id: string, title: string, url?: string }[]>([])
-  const [answerSource, setAnswerSource] = useState('演示结果')
+  const [answerSource, setAnswerSource] = useState('')
+  const [answerScope, setAnswerScope] = useState('')
+  const [answeredQuestion, setAnsweredQuestion] = useState('')
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const submit = async () => {
-    setAsked(true)
+    const normalizedQuestion = question.trim()
+    if (!normalizedQuestion || isLoading) return
+    setIsLoading(true)
+    setError(null)
+    setAnswer(null)
+    setCitations([])
+    setAnswerSource('')
+    setAnswerScope('')
     try {
-      const response = await fetch('/api/v1/research/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, scope }) })
-      if (!response.ok) throw new Error('research request failed')
-      const result = await response.json() as { source?: string, answer?: { conclusion?: string, citations?: { id: string, title: string, url?: string }[] } }
-      if (result.answer?.conclusion) { setAnswer(result.answer.conclusion); setCitations(result.answer.citations ?? []); setAnswerSource(result.source === 'weknora-agent' ? 'WeKnora · 机构研究工作台' : '研究服务') }
-    } catch { setAnswer('当前无法连接 WeKnora 机构研究工作台。请确认 Go 服务已启动，且已配置 WeKnora 凭据。'); setCitations([]); setAnswerSource('连接失败') }
+      const response = await fetch('/api/v1/research/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: normalizedQuestion, scope }) })
+      const result = await response.json().catch(() => null) as { error?: string, source?: string, answer?: { conclusion?: string, citations?: { id: string, title: string, url?: string }[] } } | null
+      if (!response.ok || !result?.answer?.conclusion) throw new Error(result?.error || 'HYGR 未返回可展示的研究回答，请稍后重试。')
+      setAnswer(result.answer.conclusion)
+      setCitations(result.answer.citations ?? [])
+      setAnswerScope(scope)
+      setAnsweredQuestion(normalizedQuestion)
+      setAnswerSource(result.source === 'weknora-agent' ? 'HYGR 智能问答' : '研究服务')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '当前无法连接 HYGR 智能问答，请稍后重试。')
+    } finally {
+      setIsLoading(false)
+    }
   }
   return <div className="ask-layout">
     <Card className="ask-hero">
       <div className="eyebrow">ASK RESEARCH <span>WEKNORA RETRIEVAL READY</span></div>
       <h2>今天，想验证什么判断？</h2>
       <p>答案会区分历史观点与当前信息，并保留每条证据的时间锚点。</p>
-      <a className="linked-knowledge-base" href={weKnoraAgentURL} target="_blank" rel="noreferrer" aria-label="在 WeKnora 中打开 HYGR 投研工作台">
-        <span className="knowledge-mark">H</span>
-        <span className="knowledge-copy"><b>HYGR投研工作台</b><small>关联 WeKnora 智能体 · 内部研究记忆与实时市场数据</small></span>
-        <span className="knowledge-open">打开工作台 ↗</span>
-      </a>
-      <div className="scope-row">{['仅内部', '内部 + 实时', '仅原始来源'].map(item => <button key={item} onClick={() => setScope(item)} className={`scope ${scope === item ? 'active' : ''}`}>{item}</button>)}</div>
-      <div className="ask-box"><input value={question} onChange={e => setQuestion(e.target.value)} onKeyDown={e => e.key === 'Enter' && void submit()} /><button onClick={() => void submit()}>发起研究 →</button></div>
-      <div className="quick-row">{['问财报', '问事件', '问标的', '问持仓', '问历史'].map(x => <button key={x} onClick={() => { setQuestion(`${x}：请给出当前最重要的研究结论`); setAsked(true) }}>{x}</button>)}</div>
+      <div className="ask-connection"><i /> HYGR 智能问答已连接 · 当前页直接检索与回答</div>
+      <div className="scope-row">{['仅内部', '内部 + 实时', '仅原始来源'].map(item => <button key={item} disabled={isLoading} onClick={() => setScope(item)} className={`scope ${scope === item ? 'active' : ''}`}>{item}</button>)}</div>
+      <div className="ask-box"><input aria-label="研究问题" disabled={isLoading} placeholder="输入需要验证的研究判断…" value={question} onChange={e => { setQuestion(e.target.value); setError(null) }} onKeyDown={e => e.key === 'Enter' && void submit()} /><button disabled={isLoading || !question.trim()} onClick={() => void submit()}>{isLoading ? '检索中…' : '发起研究 →'}</button></div>
+      <div className="quick-row">{['问财报', '问事件', '问标的', '问持仓', '问历史'].map(x => <button disabled={isLoading} key={x} onClick={() => { setQuestion(`${x}：请给出当前最重要的研究结论`); setError(null) }}>{x}</button>)}</div>
     </Card>
-    {asked && <Card className="answer-card">
-      <div className="answer-top"><div><Pill tone="violet">{scope}</Pill><span className="temporal">{answerSource}</span></div><button className="ghost">生成快评 ↗</button></div>
-      <div className="question-label">{question}</div>
-      <div className="answer-grid">
-        <AnswerBlock title="结论" text={answer} />
-        <AnswerBlock title="证据" text="OI 在 2 小时内下降 9%，现货净流出占比仅 18%；下方清算密集区距现价约 6%。" />
-        <AnswerBlock title="对逻辑的影响" text="短期中性偏空，杠杆风险判断强化；中期配置逻辑仍需以 ETF 资金流和宏观流动性验证。" />
-        <AnswerBlock title="下一验证项" text="关注未来 4 小时 Funding 是否转负，以及现货是否出现连续净流出。" />
-      </div>
+    {isLoading && <Card className="answer-card answer-loading"><div className="answer-loading-indicator" /><div><b>正在检索 HYGR 投研工作台…</b><p>正在结合所选范围内的研究记忆与市场数据生成回答。</p></div></Card>}
+    {error && <Card className="answer-card answer-error"><b>本次研究未完成</b><p>{error}</p><button className="primary" onClick={() => void submit()}>重新发起研究</button></Card>}
+    {answer && !isLoading && <Card className="answer-card">
+      <div className="answer-top"><div><Pill tone="violet">{answerScope}</Pill><span className="temporal">{answerSource}</span></div></div>
+      <div className="question-label">{answeredQuestion}</div>
+      <div className="answer-content"><h4>研究回答</h4><p>{answer}</p></div>
       <div className="citations"><span>检索引用</span>{citations.length ? citations.map((citation, i) => citation.url ? <a key={citation.id || citation.title} href={citation.url} target="_blank" rel="noreferrer">[{i + 1}] {citation.title}</a> : <span className="citation-chip" key={citation.id || citation.title}>[{i + 1}] {citation.title}</span>) : <span className="no-citation">本次回答未返回可展示的引用。</span>}</div>
     </Card>}
   </div>
 }
-
-function AnswerBlock({ title, text }: { title: string, text: string }) { return <div className="answer-block"><h4>{title}</h4><p>{text}</p></div> }
 
 function MemoryPage() {
   const [selected, setSelected] = useState<Report>(reports[0]); const [search, setSearch] = useState(''); const [status, setStatus] = useState('全部状态')
@@ -135,6 +143,6 @@ function CockpitPage() { return <><div className="cockpit-note">驾驶舱为聚�
 function SettingsPage({ page }: { page: Page }) { const isSource = page === 'sources'; const isRules = page === 'rules'; return <Card><div className="eyebrow">ADMIN ONLY</div><h2>{pageMeta[page][0]}</h2><p className="settings-intro">所有配置修改均写入机构审计日志，并由相应权限范围控制。</p>{isSource && <><Setting title="WeKnora 机构研究知识库" detail="已连接 · 1,284 个文档 · 最近同步 8 分钟前" enabled /><Setting title="研究邮箱附件入库" detail="首期关闭；保留后续授权接入位" /><Setting title="网盘目录增量同步" detail="首期关闭；仅允许白名单目录" /></>}{isRules && <><Setting title="多维共振主动提示" detail="≥ 2 个显著风险维度同时触发" enabled /><Setting title="最高优先级" detail="4 个风险维度同时异常" enabled /><Setting title="自动化交易执行" detail="硬性禁用：风险模块不得连接下单 API" /></>}{page === 'audit' && <table><thead><tr><th>成员</th><th>角色</th><th>可访问范围</th><th>最近活动</th></tr></thead><tbody><tr><td><b>林然</b></td><td>研究负责人</td><td>全部研究与裁决</td><td>14:35 · 确认风险提示</td></tr><tr><td><b>陈可</b></td><td>研究员</td><td>加密、宏观</td><td>13:12 · 上传报告</td></tr><tr><td><b>Alex</b></td><td>观察者</td><td>已发布研究</td><td>昨日 17:40 · 阅读</td></tr></tbody></table>}</Card> }
 function Setting({ title, detail, enabled = false }: {title:string, detail:string, enabled?:boolean}) { const [on, setOn] = useState(enabled); return <div className="setting"><div><b>{title}</b><p>{detail}</p></div><button onClick={() => setOn(!on)} className={`toggle ${on ? 'on' : ''}`}><i /></button></div> }
 
-function App() { const [page, setPage] = useState<Page>('ask'); const [collapsed, setCollapsed] = useState(false); const render = () => ({ask:<AskPage />, memory:<MemoryPage />, studio:<StudioPage />, risk:<RiskPage />, liquidation:<LiquidationBubblePage />, watchlist:<WatchlistPage />, cockpit:<CockpitPage />, sources:<SettingsPage page="sources" />, rules:<SettingsPage page="rules" />, audit:<SettingsPage page="audit" />}[page]); const [title, subtitle] = pageMeta[page]; return <div className={`app-shell ${collapsed ? 'collapsed' : ''}`}><aside><div className="brand"><span>R</span><div><b>RESEARCH OS</b><small>机构研究工作台</small></div><button onClick={() => setCollapsed(!collapsed)}>☰</button></div><nav>{navGroups.map(group => <div className="nav-group" key={group.label}><label>{group.label}</label>{group.items.map(([id, icon, text]) => <button key={id} onClick={() => setPage(id)} className={page === id ? 'active' : ''}><i>{icon}</i><span>{text}</span>{id === 'risk' && <em>2</em>}</button>)}</div>)}</nav><div className="user"><div className="avatar">LR</div><div><b>林然</b><small>研究负责人</small></div><span>⌄</span></div></aside><main><header><div><div className="breadcrumb">RESEARCH OS / {title}</div><h1>{title}</h1><p>{subtitle}</p></div><div className="header-actions"><button className="notice">◉<span>2</span></button><a className="status" href="http://10.15.0.27/platform/agents" target="_blank" rel="noreferrer"><i /> WeKnora 工作台 ↗</a></div></header><div className="page-content">{render()}</div><BuildFooter /></main></div> }
+function App() { const [page, setPage] = useState<Page>('ask'); const [collapsed, setCollapsed] = useState(false); const render = () => ({ask:<AskPage />, memory:<MemoryPage />, studio:<StudioPage />, risk:<RiskPage />, liquidation:<LiquidationBubblePage />, watchlist:<WatchlistPage />, cockpit:<CockpitPage />, sources:<SettingsPage page="sources" />, rules:<SettingsPage page="rules" />, audit:<SettingsPage page="audit" />}[page]); const [title, subtitle] = pageMeta[page]; return <div className={`app-shell ${collapsed ? 'collapsed' : ''}`}><aside><div className="brand"><span>R</span><div><b>RESEARCH OS</b><small>机构研究工作台</small></div><button onClick={() => setCollapsed(!collapsed)}>☰</button></div><nav>{navGroups.map(group => <div className="nav-group" key={group.label}><label>{group.label}</label>{group.items.map(([id, icon, text]) => <button key={id} onClick={() => setPage(id)} className={page === id ? 'active' : ''}><i>{icon}</i><span>{text}</span>{id === 'risk' && <em>2</em>}</button>)}</div>)}</nav><div className="user"><div className="avatar">LR</div><div><b>林然</b><small>研究负责人</small></div><span>⌄</span></div></aside><main><header><div><div className="breadcrumb">RESEARCH OS / {title}</div><h1>{title}</h1><p>{subtitle}</p></div><div className="header-actions"><button className="notice">◉<span>2</span></button><span className="status"><i /> HYGR 智能问答已连接</span></div></header><div className="page-content">{render()}</div><BuildFooter /></main></div> }
 
 export default App
