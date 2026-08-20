@@ -1,5 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import * as echarts from 'echarts/core'
+import { CandlestickChart, ScatterChart } from 'echarts/charts'
+import { DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
 import { navGroups, reports, type Report } from './data'
+
+echarts.use([CandlestickChart, ScatterChart, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
 type Page = typeof navGroups[number]['items'][number][0]
 const pageMeta: Record<Page, [string, string]> = {
@@ -7,6 +13,7 @@ const pageMeta: Record<Page, [string, string]> = {
   memory: ['机构研究记忆', '将报告、证据与投资判断沉淀为可调用的机构资产'],
   studio: ['研究工作区', '上传、校验与裁决，让 AI 辅助而不替代研究责任'],
   risk: ['ETH 风险雷达', '可解释的多维风险共振监测 · 不连接自动交易'],
+  liquidation: ['爆仓气泡图', 'Binance / OKX 公开清算流 · 仅研究监测，不连接交易'],
   watchlist: ['重点关注池', '集中查看标的、主题与持仓的研究状态'],
   cockpit: ['研究驾驶舱', '面向团队的研究状态聚合 · 内容成熟后逐步启用'],
   sources: ['知识库与数据接入', '管理 WeKnora 知识库与已授权的数据同步源'],
@@ -18,6 +25,7 @@ const Pill = ({ children, tone = 'neutral' }: { children: React.ReactNode, tone?
 const Card = ({ children, className = '' }: { children: React.ReactNode, className?: string }) => <section className={`card ${className}`}>{children}</section>
 
 function AskPage() {
+  const weKnoraAgentURL = 'http://10.15.0.27/platform/agents'
   const [scope, setScope] = useState('内部 + 实时')
   const [question, setQuestion] = useState('ETH 过去一周的核心逻辑变化是什么？')
   const [asked, setAsked] = useState(true)
@@ -38,6 +46,11 @@ function AskPage() {
       <div className="eyebrow">ASK RESEARCH <span>WEKNORA RETRIEVAL READY</span></div>
       <h2>今天，想验证什么判断？</h2>
       <p>答案会区分历史观点与当前信息，并保留每条证据的时间锚点。</p>
+      <a className="linked-knowledge-base" href={weKnoraAgentURL} target="_blank" rel="noreferrer" aria-label="在 WeKnora 中打开 HYGR 投研工作台">
+        <span className="knowledge-mark">H</span>
+        <span className="knowledge-copy"><b>HYGR投研工作台</b><small>关联 WeKnora 智能体 · 内部研究记忆与实时市场数据</small></span>
+        <span className="knowledge-open">打开工作台 ↗</span>
+      </a>
       <div className="scope-row">{['仅内部', '内部 + 实时', '仅原始来源'].map(item => <button key={item} onClick={() => setScope(item)} className={`scope ${scope === item ? 'active' : ''}`}>{item}</button>)}</div>
       <div className="ask-box"><input value={question} onChange={e => setQuestion(e.target.value)} onKeyDown={e => e.key === 'Enter' && void submit()} /><button onClick={() => void submit()}>发起研究 →</button></div>
       <div className="quick-row">{['问财报', '问事件', '问标的', '问持仓', '问历史'].map(x => <button key={x} onClick={() => { setQuestion(`${x}：请给出当前最重要的研究结论`); setAsked(true) }}>{x}</button>)}</div>
@@ -78,6 +91,95 @@ function RiskPage() {
   </>
 }
 
+type LiquidationEvent = { exchange: 'binance' | 'okx', symbol: string, occurredAt: string, side: 'long' | 'short', price: number, quantity: number, notional: number }
+type LiquidationCandle = { openTime: string, open: number, high: number, low: number, close: number, volume: number }
+type LiquidationSymbol = { symbol: string, turnover: number }
+type LiquidationStatus = { database: boolean, exchanges: Record<string, { connected: boolean, lastEvent?: string, error?: string }> }
+type LiquidationChart = { symbol: string, range: string, collectionStartedAt?: string, candles: LiquidationCandle[], events: LiquidationEvent[], status: LiquidationStatus }
+
+const chartRanges = ['1h', '4h', '24h', '7d'] as const
+const initialSymbols: LiquidationSymbol[] = [{ symbol: 'ETH-USDT', turnover: 0 }]
+const formatMoney = (value: number) => value >= 1_000_000 ? `$${(value / 1_000_000).toFixed(2)}M` : value >= 1_000 ? `$${(value / 1_000).toFixed(1)}K` : `$${value.toFixed(0)}`
+
+function LiquidationBubblePage() {
+  const chartElement = useRef<HTMLDivElement>(null)
+  const chartInstance = useRef<echarts.ECharts | null>(null)
+  const [symbols, setSymbols] = useState<LiquidationSymbol[]>(initialSymbols)
+  const [selected, setSelected] = useState('ETH-USDT')
+  const [selectedWindow, setSelectedWindow] = useState<(typeof chartRanges)[number]>('24h')
+  const [venue, setVenue] = useState('all')
+  const [data, setData] = useState<LiquidationChart | null>(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void fetch('/api/v1/liquidations/symbols', { signal: controller.signal }).then(async response => {
+      if (!response.ok) throw new Error('无法读取币对目录')
+      const result = await response.json() as { symbols?: LiquidationSymbol[] }
+      if (result.symbols?.length) { setSymbols(result.symbols); if (!result.symbols.some(item => item.symbol === selected)) setSelected(result.symbols[0].symbol) }
+    }).catch(fetchError => { if ((fetchError as Error).name !== 'AbortError') setError((fetchError as Error).message) })
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController(); setLoading(true); setError('')
+    const query = new URLSearchParams({ symbol: selected, range: selectedWindow, exchanges: venue })
+    void fetch(`/api/v1/liquidations/chart?${query}`, { signal: controller.signal }).then(async response => {
+      const result = await response.json() as LiquidationChart & { error?: string }
+      if (!response.ok) throw new Error(result.error || '无法读取爆仓数据')
+      setData(result)
+    }).catch(fetchError => { if ((fetchError as Error).name !== 'AbortError') { setData(null); setError((fetchError as Error).message) } }).finally(() => setLoading(false))
+    return () => controller.abort()
+  }, [selected, selectedWindow, venue])
+
+  useEffect(() => {
+    if (!chartElement.current) return
+    const instance = echarts.init(chartElement.current)
+    chartInstance.current = instance
+    const observer = new ResizeObserver(() => instance.resize())
+    observer.observe(chartElement.current)
+    return () => { observer.disconnect(); instance.dispose(); chartInstance.current = null }
+  }, [])
+
+  useEffect(() => {
+    const instance = chartInstance.current
+    if (!instance) return
+    const candles = data?.candles ?? []
+    const events = data?.events ?? []
+    const bubbleSeries = (side: 'long' | 'short', color: string, name: string) => ({
+      name, type: 'scatter' as const, data: events.filter(item => item.side === side).map(item => [item.occurredAt, item.price, item.notional, item.exchange, item.quantity]),
+      symbolSize: (value: unknown[]) => Math.min(46, Math.max(8, Math.log10(Number(value[2]) + 1) * 5)), itemStyle: { color, opacity: 0.72 }, z: 6,
+    })
+    instance.setOption({
+      animation: false, backgroundColor: 'transparent', grid: { left: 58, right: 28, top: 44, bottom: 68 },
+      legend: { top: 8, textStyle: { color: '#9eacc1', fontSize: 11 }, data: ['OKX 5m K线', '多头爆仓', '空头爆仓'] },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' }, backgroundColor: '#101925', borderColor: '#3a4b65', textStyle: { color: '#e9eef7' },
+        formatter: (params: unknown) => { const list = params as Array<{ seriesName: string, value: unknown[] }>; const points = list.filter(item => item.seriesName !== 'OKX 5m K线'); if (!points.length) return ''; return points.map(item => `<b>${item.seriesName}</b><br/>时间：${new Date(String(item.value[0])).toLocaleString()}<br/>价格：${Number(item.value[1]).toLocaleString()}<br/>名义价值：${formatMoney(Number(item.value[2]))}<br/>交易所：${item.value[3]}<br/>数量：${Number(item.value[4]).toLocaleString()}`).join('<hr/>') },
+      },
+      xAxis: { type: 'time', axisLine: { lineStyle: { color: '#415069' } }, axisLabel: { color: '#8492a7' }, splitLine: { show: false } },
+      yAxis: { scale: true, axisLine: { lineStyle: { color: '#415069' } }, axisLabel: { color: '#8492a7' }, splitLine: { lineStyle: { color: '#243044' } } },
+      dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 18, borderColor: '#314058', fillerColor: '#725cbb55', textStyle: { color: '#8492a7' } }],
+      series: [{ name: 'OKX 5m K线', type: 'candlestick', data: candles.map(item => [item.openTime, item.open, item.close, item.low, item.high]), itemStyle: { color: '#57c995', color0: '#ec6e83', borderColor: '#57c995', borderColor0: '#ec6e83' } }, bubbleSeries('long', '#f06e84', '多头爆仓'), bubbleSeries('short', '#55d7a1', '空头爆仓')],
+    }, true)
+    if (candles.length === 0) instance.clear()
+  }, [data])
+
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const socket = new WebSocket(`${protocol}://${window.location.host}/api/v1/liquidations/stream?${new URLSearchParams({ symbol: selected, exchanges: venue })}`)
+    socket.onmessage = message => { const result = JSON.parse(message.data) as { type?: string, event?: LiquidationEvent }; if (result.type === 'liquidation' && result.event) setData(current => current && current.symbol === result.event?.symbol ? { ...current, events: [...current.events, result.event] } : current) }
+    return () => socket.close()
+  }, [selected, venue])
+
+  const status = data?.status
+  const started = data?.collectionStartedAt ? new Date(data.collectionStartedAt).toLocaleString() : '尚未收到爆仓事件'
+  return <div className="liquidation-page">
+    <div className="liquidation-top"><div><div className="eyebrow">PUBLIC LIQUIDATION FLOW · BINANCE / OKX</div><h2>爆仓气泡图</h2><p>OKX USDT 永续 K 线叠加公开爆仓事件。数据自服务上线开始累计，不包含此前历史。</p></div><div className="liquidation-status"><span className={status?.exchanges.binance?.connected ? 'online' : ''}>Binance {status?.exchanges.binance?.connected ? '已连接' : '连接中'}</span><span className={status?.exchanges.okx?.connected ? 'online' : ''}>OKX {status?.exchanges.okx?.connected ? '已连接' : '连接中'}</span></div></div>
+    <Card className="liquidation-chart-card"><div className="liquidation-controls"><label>币对<select value={selected} onChange={event => setSelected(event.target.value)}>{symbols.map(item => <option key={item.symbol}>{item.symbol}</option>)}</select></label><div className="range-buttons">{chartRanges.map(item => <button key={item} className={selectedWindow === item ? 'active' : ''} onClick={() => setSelectedWindow(item)}>{item}</button>)}</div><div className="venue-buttons">{[['all', '全部'], ['binance', 'Binance'], ['okx', 'OKX']].map(([id, label]) => <button key={id} className={venue === id ? 'active' : ''} onClick={() => setVenue(id)}>{label}</button>)}</div></div><div className="collection-note">爆仓数据采集起始：{started} · 当前展示 {data?.events.length ?? 0} 个原始事件</div><div className="liquidation-chart-wrap"><div className="liquidation-chart" ref={chartElement} />{error ? <div className="liquidation-empty error">{error}<small>请配置 RAG_UI_DATABASE_URL，并等待两所公开数据流建立连接。</small></div> : loading ? <div className="liquidation-empty">正在加载 {selected} 图表数据…</div> : data && data.candles.length === 0 ? <div className="liquidation-empty">K 线正在从 OKX 公开流累积。连接建立后会自动刷新。</div> : null}</div></Card>
+  </div>
+}
+
 function WatchlistPage() { return <Card><div className="card-heading"><div><div className="eyebrow">WATCHLIST</div><h2>重点关注池</h2></div><button className="primary">+ 添加关注</button></div><table><thead><tr><th>对象</th><th>当前研究状态</th><th>最新研究</th><th>风险状态</th><th>下一验证项</th></tr></thead><tbody>{[['ETH','框架有效','ETH 8 月综合研判','风险升高','Funding 是否转负'],['NVDA','预期差收窄','财报前预期差跟踪','定价观察','Capex 指引'],['AI 光通信','逻辑强化','产业链更新','正常','订单交付节奏']].map((x, i) => <tr key={x[0]}><td><b>{x[0]}</b><small>{i === 0 ? '加密资产' : i === 1 ? '美股' : '产业主题'}</small></td><td><Pill tone="green">{x[1]}</Pill></td><td>{x[2]}</td><td><Pill tone={i === 0 ? 'red' : 'amber'}>{x[3]}</Pill></td><td>{x[4]}</td></tr>)}</tbody></table></Card> }
 
 function CockpitPage() { return <><div className="cockpit-note">驾驶舱为聚合层 · 当前展示来自研究记忆、风险雷达与关注池的真实页面状态</div><div className="market-strip">{[['S&P 500','7,728','-0.3%'],['Nasdaq','26,445','-0.6%'],['VIX','15.5','平'],['BTC','$64.7K','↑'],['ETH','$1,904','↑']].map(x => <div key={x[0]}><span>{x[0]}</span><b>{x[1]}</b><em>{x[2]}</em></div>)}</div><div className="cockpit-grid"><Card><div className="eyebrow">DECISION RADAR</div><h2>距上次查看以来</h2>{['ETH · 风险升高 — 清算区上移，OI 持续增加','AI 光通信 · 逻辑强化 — 客户 Capex 预期上调','NVDA · 定价观察 — 预期差正在收窄'].map(x => <div className="radar-item" key={x}>● {x}</div>)}</Card><Card><div className="eyebrow">RESEARCH FEED</div><h2>研究成果流</h2>{reports.slice(0, 3).map(r => <div className="feed" key={r.id}><b>{r.title}</b><span>{r.date} · {r.type}</span></div>)}</Card></div></> }
@@ -85,6 +187,6 @@ function CockpitPage() { return <><div className="cockpit-note">驾驶舱为聚�
 function SettingsPage({ page }: { page: Page }) { const isSource = page === 'sources'; const isRules = page === 'rules'; return <Card><div className="eyebrow">ADMIN ONLY</div><h2>{pageMeta[page][0]}</h2><p className="settings-intro">所有配置修改均写入机构审计日志，并由相应权限范围控制。</p>{isSource && <><Setting title="WeKnora 机构研究知识库" detail="已连接 · 1,284 个文档 · 最近同步 8 分钟前" enabled /><Setting title="研究邮箱附件入库" detail="首期关闭；保留后续授权接入位" /><Setting title="网盘目录增量同步" detail="首期关闭；仅允许白名单目录" /></>}{isRules && <><Setting title="多维共振主动提示" detail="≥ 2 个显著风险维度同时触发" enabled /><Setting title="最高优先级" detail="4 个风险维度同时异常" enabled /><Setting title="自动化交易执行" detail="硬性禁用：风险模块不得连接下单 API" /></>}{page === 'audit' && <table><thead><tr><th>成员</th><th>角色</th><th>可访问范围</th><th>最近活动</th></tr></thead><tbody><tr><td><b>林然</b></td><td>研究负责人</td><td>全部研究与裁决</td><td>14:35 · 确认风险提示</td></tr><tr><td><b>陈可</b></td><td>研究员</td><td>加密、宏观</td><td>13:12 · 上传报告</td></tr><tr><td><b>Alex</b></td><td>观察者</td><td>已发布研究</td><td>昨日 17:40 · 阅读</td></tr></tbody></table>}</Card> }
 function Setting({ title, detail, enabled = false }: {title:string, detail:string, enabled?:boolean}) { const [on, setOn] = useState(enabled); return <div className="setting"><div><b>{title}</b><p>{detail}</p></div><button onClick={() => setOn(!on)} className={`toggle ${on ? 'on' : ''}`}><i /></button></div> }
 
-function App() { const [page, setPage] = useState<Page>('ask'); const [collapsed, setCollapsed] = useState(false); const render = () => ({ask:<AskPage />, memory:<MemoryPage />, studio:<StudioPage />, risk:<RiskPage />, watchlist:<WatchlistPage />, cockpit:<CockpitPage />, sources:<SettingsPage page="sources" />, rules:<SettingsPage page="rules" />, audit:<SettingsPage page="audit" />}[page]); const [title, subtitle] = pageMeta[page]; return <div className={`app-shell ${collapsed ? 'collapsed' : ''}`}><aside><div className="brand"><span>R</span><div><b>RESEARCH OS</b><small>机构研究工作台</small></div><button onClick={() => setCollapsed(!collapsed)}>☰</button></div><nav>{navGroups.map(group => <div className="nav-group" key={group.label}><label>{group.label}</label>{group.items.map(([id, icon, text]) => <button key={id} onClick={() => setPage(id)} className={page === id ? 'active' : ''}><i>{icon}</i><span>{text}</span>{id === 'risk' && <em>2</em>}</button>)}</div>)}</nav><div className="user"><div className="avatar">LR</div><div><b>林然</b><small>研究负责人</small></div><span>⌄</span></div></aside><main><header><div><div className="breadcrumb">RESEARCH OS / {title}</div><h1>{title}</h1><p>{subtitle}</p></div><div className="header-actions"><button className="notice">◉<span>2</span></button><button className="status"><i /> WeKnora 已连接</button></div></header><div className="page-content">{render()}</div></main></div> }
+function App() { const [page, setPage] = useState<Page>('ask'); const [collapsed, setCollapsed] = useState(false); const render = () => ({ask:<AskPage />, memory:<MemoryPage />, studio:<StudioPage />, risk:<RiskPage />, liquidation:<LiquidationBubblePage />, watchlist:<WatchlistPage />, cockpit:<CockpitPage />, sources:<SettingsPage page="sources" />, rules:<SettingsPage page="rules" />, audit:<SettingsPage page="audit" />}[page]); const [title, subtitle] = pageMeta[page]; return <div className={`app-shell ${collapsed ? 'collapsed' : ''}`}><aside><div className="brand"><span>R</span><div><b>RESEARCH OS</b><small>机构研究工作台</small></div><button onClick={() => setCollapsed(!collapsed)}>☰</button></div><nav>{navGroups.map(group => <div className="nav-group" key={group.label}><label>{group.label}</label>{group.items.map(([id, icon, text]) => <button key={id} onClick={() => setPage(id)} className={page === id ? 'active' : ''}><i>{icon}</i><span>{text}</span>{id === 'risk' && <em>2</em>}</button>)}</div>)}</nav><div className="user"><div className="avatar">LR</div><div><b>林然</b><small>研究负责人</small></div><span>⌄</span></div></aside><main><header><div><div className="breadcrumb">RESEARCH OS / {title}</div><h1>{title}</h1><p>{subtitle}</p></div><div className="header-actions"><button className="notice">◉<span>2</span></button><a className="status" href="http://10.15.0.27/platform/agents" target="_blank" rel="noreferrer"><i /> WeKnora 工作台 ↗</a></div></header><div className="page-content">{render()}</div></main></div> }
 
 export default App
