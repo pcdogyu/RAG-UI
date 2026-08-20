@@ -177,15 +177,32 @@ function LiquidationBubblePage({ theme }: { theme: Theme }) {
     const minNotional = events.length ? Math.min(...events.map(item => item.notional)) : 0; const maxNotional = events.length ? Math.max(...events.map(item => item.notional)) : 0
     const bubbleSize = (notional: number) => maxNotional <= minNotional ? 24 : 12 + 46 * Math.sqrt(Math.max(0, (notional - minNotional) / (maxNotional - minNotional)))
     const zoom = zoomWindow.current; const zoomState = zoom ? { start: zoom.start, end: zoom.end } : {}
-    const bubbles = (side: 'long' | 'short', color: string, name: string) => ({
-      name, type: 'scatter' as const,
-      data: events.filter(item => item.side === side).map(item => {
+    const bubbles = (side: 'long' | 'short', color: string, name: string) => {
+      const groups = new Map<string, Array<{ item: LiquidationEvent, candle?: LiquidationCandle }>>()
+      for (const item of events.filter(event => event.side === side)) {
         const candle = candleAt(item.occurredAt)
-        const plotPrice = candle ? (side === 'long' ? candle.low - bubblePadding : candle.high + bubblePadding) : item.price
-        return [item.occurredAt, plotPrice, item.notional, item.exchange, item.quantity, item.price]
-      }),
+        const key = candle?.openTime ?? item.occurredAt
+        const group = groups.get(key) ?? []
+        group.push({ item, candle })
+        groups.set(key, group)
+      }
+      const data = Array.from(groups.values()).flatMap(group => {
+        group.sort((left, right) => Date.parse(left.item.occurredAt) - Date.parse(right.item.occurredAt) || right.item.notional - left.item.notional)
+        let distance = 0
+        return group.map(({ item, candle }) => {
+          const radiusInPrice = priceSpan * Math.max(20, bubbleSize(item.notional)) / 720
+          distance += radiusInPrice + bubblePadding
+          const anchor = candle ? (side === 'long' ? candle.low : candle.high) : item.price
+          const plotPrice = side === 'long' ? anchor - distance : anchor + distance
+          distance += radiusInPrice
+          return [item.occurredAt, plotPrice, item.notional, item.exchange, item.quantity, item.price]
+        })
+      })
+      return {
+      name, type: 'scatter' as const, data,
       symbolOffset: [0, side === 'long' ? 12 : -12], symbolSize: (value: unknown[]) => bubbleSize(Number(value[2])), label: { show: showBubbleQuantity, position: 'inside', color: chartTheme.bubbleLabel, fontSize: 9, fontWeight: 700, formatter: (params: { value?: unknown[] }) => formatQuantity(Number(params.value?.[4])) }, itemStyle: { color, opacity: .72 }, z: 6
-    })
+      }
+    }
     const chartTheme = theme === 'light'
       ? { muted: '#52657c', grid: '#d7e0ec', tooltip: '#ffffff', tooltipBorder: '#b6c4d6', text: '#18243a', sliderBorder: '#b8c6d8', sliderFill: '#725cbb40', bubbleLabel: '#1f3149' }
       : { muted: '#9eacc1', grid: '#243044', tooltip: '#101925', tooltipBorder: '#3a4b65', text: '#e9eef7', sliderBorder: '#314058', sliderFill: '#725cbb55', bubbleLabel: '#eef5ff' }
