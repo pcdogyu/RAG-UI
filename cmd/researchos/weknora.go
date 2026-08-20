@@ -100,6 +100,20 @@ type storedMessage struct {
 	Content    string             `json:"content"`
 	Completed  bool               `json:"is_completed"`
 	References []weKnoraReference `json:"knowledge_references"`
+	AgentSteps []weKnoraAgentStep `json:"agent_steps"`
+}
+
+type weKnoraAgentStep struct {
+	Timestamp time.Time              `json:"timestamp"`
+	ToolCalls []weKnoraAgentToolCall `json:"tool_calls"`
+}
+
+type weKnoraAgentToolCall struct {
+	Name     string `json:"name"`
+	Duration int64  `json:"duration"`
+	Result   struct {
+		Success *bool `json:"success"`
+	} `json:"result"`
 }
 
 type messagesResponse struct {
@@ -123,6 +137,7 @@ type ResearchCitation struct {
 type ResearchToolCall struct {
 	Name       string    `json:"name"`
 	Detail     string    `json:"detail"`
+	Source     string    `json:"source"`
 	StartedAt  time.Time `json:"started_at"`
 	DurationMS int64     `json:"duration_ms"`
 	Status     string    `json:"status"`
@@ -142,6 +157,7 @@ func (r *researchCallRecorder) record(name, detail string, action func() error) 
 	r.calls = append(r.calls, ResearchToolCall{
 		Name:       name,
 		Detail:     detail,
+		Source:     "gateway",
 		StartedAt:  startedAt,
 		DurationMS: time.Since(startedAt).Milliseconds(),
 		Status:     status,
@@ -207,7 +223,7 @@ func (c *WeKnoraClient) Ask(ctx context.Context, question, scope string) (WeKnor
 		answer, answerErr = c.loadAnswer(ctx, login, sessionID)
 		return answerErr
 	})
-	answer.ToolCalls = recorder.calls
+	answer.ToolCalls = append(answer.ToolCalls, recorder.calls...)
 	if err != nil {
 		return answer, err
 	}
@@ -301,7 +317,7 @@ func (c *WeKnoraClient) loadAnswer(ctx context.Context, login weKnoraLogin, sess
 		if message.Role != "assistant" || !message.Completed {
 			continue
 		}
-		answer := WeKnoraAnswer{Conclusion: message.Content}
+		answer := WeKnoraAnswer{Conclusion: message.Content, ToolCalls: toolCallsFromAgentSteps(message.AgentSteps)}
 		for _, reference := range message.References {
 			title := firstNonEmpty(reference.KnowledgeTitle, reference.KnowledgeFile, reference.ID, reference.KnowledgeID)
 			answer.Citations = append(answer.Citations, ResearchCitation{ID: firstNonEmpty(reference.ID, reference.KnowledgeID), Title: title, URL: reference.Metadata.URL})
@@ -309,6 +325,31 @@ func (c *WeKnoraClient) loadAnswer(ctx context.Context, login weKnoraLogin, sess
 		return answer, nil
 	}
 	return WeKnoraAnswer{}, fmt.Errorf("WeKnora returned no completed assistant answer")
+}
+
+func toolCallsFromAgentSteps(steps []weKnoraAgentStep) []ResearchToolCall {
+	toolCalls := make([]ResearchToolCall, 0)
+	for _, step := range steps {
+		for _, toolCall := range step.ToolCalls {
+			name := strings.TrimSpace(toolCall.Name)
+			if name == "" {
+				continue
+			}
+			status := "completed"
+			if toolCall.Result.Success != nil && !*toolCall.Result.Success {
+				status = "failed"
+			}
+			toolCalls = append(toolCalls, ResearchToolCall{
+				Name:       name,
+				Detail:     "由 WeKnora 智能体实际执行的工具调用",
+				Source:     "agent",
+				StartedAt:  step.Timestamp,
+				DurationMS: toolCall.Duration,
+				Status:     status,
+			})
+		}
+	}
+	return toolCalls
 }
 
 func firstNonEmpty(values ...string) string {

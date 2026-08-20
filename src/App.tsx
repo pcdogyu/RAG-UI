@@ -43,7 +43,7 @@ function BuildFooter() {
 }
 
 function AskPage() {
-  type ToolCall = { name: string, detail: string, started_at: string, duration_ms: number, status: 'completed' | 'failed' }
+  type ToolCall = { name: string, detail: string, source: 'agent' | 'gateway', started_at: string, duration_ms: number, status: 'completed' | 'failed' }
   const [scope, setScope] = useState('内部 + 实时')
   const [question, setQuestion] = useState('')
   const [answer, setAnswer] = useState<string | null>(null)
@@ -98,9 +98,9 @@ function AskPage() {
       <div className="answer-content"><h4>研究回答</h4><p>{answer}</p></div>
       <div className="citations"><span>检索引用</span>{citations.length ? citations.map((citation, i) => citation.url ? <a key={citation.id || citation.title} href={citation.url} target="_blank" rel="noreferrer">[{i + 1}] {citation.title}</a> : <span className="citation-chip" key={citation.id || citation.title}>[{i + 1}] {citation.title}</span>) : <span className="no-citation">本次回答未返回可展示的引用。</span>}</div>
       <details className="tool-history" open>
-        <summary>调用历史 <span>{toolCalls.length} 步</span></summary>
-        <p className="tool-history-note">记录本次研究请求的真实服务调用；不展示令牌、密码、会话 ID 或问题原文。</p>
-        {toolCalls.length ? <ol>{toolCalls.map((call, index) => <li key={`${call.name}-${call.started_at}-${index}`}><span className={`tool-call-status ${call.status}`} /><div><b>{call.name}</b><p>{call.detail}</p></div><time>{new Date(call.started_at).toLocaleTimeString()} · {call.duration_ms} ms</time></li>)}</ol> : <p className="tool-history-empty">本次回答未返回调用记录。</p>}
+        <summary>工具调用历史 <span>{toolCalls.length} 步</span></summary>
+        <p className="tool-history-note">优先展示 WeKnora 智能体实际执行的工具，再记录本服务的调用步骤；不展示令牌、密码、会话 ID、工具参数或问题原文。</p>
+        {toolCalls.length ? <ol>{toolCalls.map((call, index) => <li key={`${call.name}-${call.started_at}-${index}`}><span className={`tool-call-status ${call.status}`} /><div><b>{call.name}</b><em>{call.source === 'agent' ? '智能体工具' : '服务步骤'}</em><p>{call.detail}</p></div><time>{new Date(call.started_at).toLocaleTimeString()} · {call.duration_ms} ms</time></li>)}</ol> : <p className="tool-history-empty">本次回答未返回调用记录。</p>}
       </details>
     </Card>}
   </div>
