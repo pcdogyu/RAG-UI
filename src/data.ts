@@ -40,7 +40,7 @@ export const reports: Report[] = [
 
 export const navGroups = [
   { label: '研究中心', items: [['ask', '◈', '智能问答'], ['memory', '▣', '研究记忆'], ['studio', '◒', '研究工作区']] },
-  { label: '市场与风险', items: [['risk', '△', '风险雷达'], ['watchlist', '◎', '关注池']] },
+  { label: '市场与风险', items: [['risk', '△', '风险雷达'], ['liquidation', '◉', '爆仓气泡图'], ['watchlist', '◎', '关注池']] },
   { label: '工作台', items: [['cockpit', '◌', '研究驾驶舱']] },
   { label: '管理中心', items: [['sources', '⌘', '知识库与数据接入'], ['rules', '≋', '风险规则配置'], ['audit', '◷', '成员权限与审计']] },
 ] as const
