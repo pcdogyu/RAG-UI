@@ -40,6 +40,37 @@ type liquidationEvent struct {
 	DedupKey string    `json:"-"`
 }
 
+type liquidationFilter struct {
+	Kind    string
+	Minimum float64
+}
+
+func parseLiquidationFilter(values url.Values) (liquidationFilter, bool) {
+	kind := strings.TrimSpace(values.Get("filter"))
+	minimumRaw := strings.TrimSpace(values.Get("min"))
+	if kind == "" && minimumRaw == "" {
+		return liquidationFilter{}, true
+	}
+	if kind != "notional" && kind != "quantity" {
+		return liquidationFilter{}, false
+	}
+	minimum, err := strconv.ParseFloat(minimumRaw, 64)
+	if err != nil || minimum <= 0 || math.IsNaN(minimum) || math.IsInf(minimum, 0) {
+		return liquidationFilter{}, false
+	}
+	return liquidationFilter{Kind: kind, Minimum: minimum}, true
+}
+
+func (f liquidationFilter) matches(event liquidationEvent) bool {
+	if f.Kind == "" {
+		return true
+	}
+	if f.Kind == "notional" {
+		return event.Notional >= f.Minimum
+	}
+	return event.Price > 0 && event.Notional/event.Price >= f.Minimum
+}
+
 type candle struct {
 	Symbol   string    `json:"symbol"`
 	Interval string    `json:"interval"`
@@ -151,7 +182,7 @@ func (s *liquidationStore) saveCandle(ctx context.Context, item candle) error {
 	return err
 }
 
-func (s *liquidationStore) chart(ctx context.Context, symbol string, since time.Time, exchanges map[string]bool) ([]candle, []liquidationEvent, time.Time, error) {
+func (s *liquidationStore) chart(ctx context.Context, symbol string, since time.Time, exchanges map[string]bool, filter liquidationFilter) ([]candle, []liquidationEvent, time.Time, error) {
 	candleRows, err := s.db.QueryContext(ctx, `SELECT symbol, interval, open_time, open, high, low, close, volume
 		FROM liquidation_candles WHERE symbol=$1 AND interval='5m' AND open_time >= $2 ORDER BY open_time`, symbol, since)
 	if err != nil {
@@ -174,9 +205,16 @@ func (s *liquidationStore) chart(ctx context.Context, symbol string, since time.
 	args := []any{symbol, since}
 	if len(exchanges) == 1 {
 		for exchange := range exchanges {
-			query += ` AND exchange=$3`
+			query += fmt.Sprintf(` AND exchange=$%d`, len(args)+1)
 			args = append(args, exchange)
 		}
+	}
+	if filter.Kind == "notional" {
+		query += fmt.Sprintf(` AND notional >= $%d`, len(args)+1)
+		args = append(args, filter.Minimum)
+	} else if filter.Kind == "quantity" {
+		query += fmt.Sprintf(` AND notional / NULLIF(price, 0) >= $%d`, len(args)+1)
+		args = append(args, filter.Minimum)
 	}
 	query += ` ORDER BY occurred_at`
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -999,6 +1037,11 @@ func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid exchanges"})
 		return
 	}
+	filter, ok := parseLiquidationFilter(r.URL.Query())
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "filter must be notional or quantity with a positive min"})
+		return
+	}
 	minimumCandles := int(time.Since(since) / (5 * time.Minute) * 3 / 4)
 	if minimumCandles < 1 {
 		minimumCandles = 1
@@ -1010,7 +1053,7 @@ func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) 
 			log.Printf("liquidation candle backfill: %v", err)
 		}
 	}
-	candles, events, collectionStart, err := s.store.chart(r.Context(), symbol, since, exchanges)
+	candles, events, collectionStart, err := s.store.chart(r.Context(), symbol, since, exchanges, filter)
 	if err != nil {
 		log.Printf("liquidation chart: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to load liquidation chart"})
@@ -1030,7 +1073,8 @@ func (s *liquidationService) serveLiveWS(w http.ResponseWriter, r *http.Request)
 	}
 	symbol := r.URL.Query().Get("symbol")
 	exchanges, ok := exchangesFromQuery(r.URL.Query().Get("exchanges"))
-	if !s.validSymbol(symbol) || !ok {
+	filter, filterOK := parseLiquidationFilter(r.URL.Query())
+	if !s.validSymbol(symbol) || !ok || !filterOK {
 		http.Error(w, "invalid subscription", http.StatusBadRequest)
 		return
 	}
@@ -1046,6 +1090,9 @@ func (s *liquidationService) serveLiveWS(w http.ResponseWriter, r *http.Request)
 		case <-r.Context().Done():
 			return
 		case event := <-subscriber.updates:
+			if !filter.matches(event) {
+				continue
+			}
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			err := wsjson.Write(ctx, conn, map[string]any{"type": "liquidation", "event": event})
 			cancel()

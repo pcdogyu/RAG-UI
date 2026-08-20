@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -141,6 +142,27 @@ func TestRangeAndVenueValidation(t *testing.T) {
 	}
 	if _, ok := exchangesFromQuery("kraken"); ok {
 		t.Fatal("unexpected accepted venue")
+	}
+}
+
+func TestLiquidationFilterValidationAndMatching(t *testing.T) {
+	notional, ok := parseLiquidationFilter(map[string][]string{"filter": {"notional"}, "min": {"5000"}})
+	if !ok || !notional.matches(liquidationEvent{Price: 2500, Notional: 5000}) || notional.matches(liquidationEvent{Price: 2500, Notional: 4999}) {
+		t.Fatalf("unexpected notional filter behavior: %+v", notional)
+	}
+	quantity, ok := parseLiquidationFilter(map[string][]string{"filter": {"quantity"}, "min": {"1"}})
+	if !ok || !quantity.matches(liquidationEvent{Price: 2500, Notional: 2500}) || quantity.matches(liquidationEvent{Price: 2500, Notional: 2499}) {
+		t.Fatalf("unexpected quantity filter behavior: %+v", quantity)
+	}
+	for _, values := range []url.Values{
+		{"filter": {"quantity"}, "min": {"0"}},
+		{"filter": {"notional"}, "min": {"NaN"}},
+		{"filter": {"unknown"}, "min": {"1"}},
+		{"filter": {"quantity"}},
+	} {
+		if _, ok := parseLiquidationFilter(values); ok {
+			t.Fatalf("expected invalid filter: %#v", values)
+		}
 	}
 }
 
