@@ -136,6 +136,11 @@ func TestRangeAndVenueValidation(t *testing.T) {
 	if _, _, ok := rangeStart("90d"); ok {
 		t.Fatal("unexpected accepted range")
 	}
+	for _, value := range []string{"8h", "12h"} {
+		if _, window, ok := rangeStart(value); !ok || window != value {
+			t.Fatalf("range %q was not accepted", value)
+		}
+	}
 	venues, ok := exchangesFromQuery("binance,okx")
 	if !ok || !venues["binance"] || !venues["okx"] {
 		t.Fatalf("unexpected venues: %#v", venues)

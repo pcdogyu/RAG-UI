@@ -978,7 +978,7 @@ func retentionDuration() time.Duration {
 }
 
 func rangeStart(value string) (time.Time, string, bool) {
-	ranges := map[string]time.Duration{"1h": time.Hour, "4h": 4 * time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour}
+	ranges := map[string]time.Duration{"1h": time.Hour, "4h": 4 * time.Hour, "8h": 8 * time.Hour, "12h": 12 * time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour}
 	if value == "" {
 		value = "24h"
 	}
@@ -1029,7 +1029,7 @@ func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) 
 	}
 	since, window, ok := rangeStart(r.URL.Query().Get("range"))
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "range must be 1h, 4h, 24h, or 7d"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "range must be 1h, 4h, 8h, 12h, 24h, or 7d"})
 		return
 	}
 	exchanges, ok := exchangesFromQuery(r.URL.Query().Get("exchanges"))
