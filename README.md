@@ -16,6 +16,19 @@ npm run build
 go run ./cmd/researchos
 ```
 
+生产构建时须从待部署的 `HEAD` 注入版本信息，使页面底部与实际二进制保持一致：
+
+```powershell
+$commit = git rev-parse --short=12 HEAD
+$branch = git branch --show-current
+$commitTime = git show -s --format=%cI HEAD
+npm run build
+$env:GOOS = 'linux'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
+go build -trimpath -ldflags "-s -w -X main.buildCommit=$commit -X main.buildBranch=$branch -X main.buildCommitTime=$commitTime" -o build/researchos ./cmd/researchos
+```
+
+`GET /api/v1/version` 返回页脚使用的作者、提交时间、提交 ID 与分支；本地 `go run` 会明确显示 `local-dev`。
+
 默认打开 `http://localhost`。健康检查：`http://localhost/health`。如需改用其他端口，可设置 `RESEARCH_OS_ADDR`（例如 `:8080`）。
 
 在启动 Go 服务前，设置 WeKnora 凭据（请只在终端或部署平台的密钥管理中设置，切勿写入仓库）：

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { navGroups, reports, type Report } from './data'
 
 type Page = typeof navGroups[number]['items'][number][0]
@@ -16,6 +16,24 @@ const pageMeta: Record<Page, [string, string]> = {
 
 const Pill = ({ children, tone = 'neutral' }: { children: React.ReactNode, tone?: string }) => <span className={`pill ${tone}`}>{children}</span>
 const Card = ({ children, className = '' }: { children: React.ReactNode, className?: string }) => <section className={`card ${className}`}>{children}</section>
+
+type VersionInfo = { author: string, commit_time: string, commit_id: string, branch: string }
+
+function BuildFooter() {
+  const [version, setVersion] = useState<VersionInfo | null>(null)
+  const [unavailable, setUnavailable] = useState(false)
+  useEffect(() => {
+    let active = true
+    void fetch('/api/v1/version', { cache: 'no-store' })
+      .then(response => response.ok ? response.json() as Promise<VersionInfo> : Promise.reject(new Error('version request failed')))
+      .then(value => { if (active) setVersion(value) })
+      .catch(() => { if (active) setUnavailable(true) })
+    return () => { active = false }
+  }, [])
+  if (unavailable) return <footer className="build-footer">版本信息不可用</footer>
+  if (!version) return <footer className="build-footer">版本信息加载中…</footer>
+  return <footer className="build-footer">Code by {version.author} · Commit time: {version.commit_time} · Commit: {version.commit_id} · Branch: {version.branch}</footer>
+}
 
 function AskPage() {
   const weKnoraAgentURL = 'http://10.15.0.27/platform/agents'
@@ -91,6 +109,6 @@ function CockpitPage() { return <><div className="cockpit-note">驾驶舱为聚�
 function SettingsPage({ page }: { page: Page }) { const isSource = page === 'sources'; const isRules = page === 'rules'; return <Card><div className="eyebrow">ADMIN ONLY</div><h2>{pageMeta[page][0]}</h2><p className="settings-intro">所有配置修改均写入机构审计日志，并由相应权限范围控制。</p>{isSource && <><Setting title="WeKnora 机构研究知识库" detail="已连接 · 1,284 个文档 · 最近同步 8 分钟前" enabled /><Setting title="研究邮箱附件入库" detail="首期关闭；保留后续授权接入位" /><Setting title="网盘目录增量同步" detail="首期关闭；仅允许白名单目录" /></>}{isRules && <><Setting title="多维共振主动提示" detail="≥ 2 个显著风险维度同时触发" enabled /><Setting title="最高优先级" detail="4 个风险维度同时异常" enabled /><Setting title="自动化交易执行" detail="硬性禁用：风险模块不得连接下单 API" /></>}{page === 'audit' && <table><thead><tr><th>成员</th><th>角色</th><th>可访问范围</th><th>最近活动</th></tr></thead><tbody><tr><td><b>林然</b></td><td>研究负责人</td><td>全部研究与裁决</td><td>14:35 · 确认风险提示</td></tr><tr><td><b>陈可</b></td><td>研究员</td><td>加密、宏观</td><td>13:12 · 上传报告</td></tr><tr><td><b>Alex</b></td><td>观察者</td><td>已发布研究</td><td>昨日 17:40 · 阅读</td></tr></tbody></table>}</Card> }
 function Setting({ title, detail, enabled = false }: {title:string, detail:string, enabled?:boolean}) { const [on, setOn] = useState(enabled); return <div className="setting"><div><b>{title}</b><p>{detail}</p></div><button onClick={() => setOn(!on)} className={`toggle ${on ? 'on' : ''}`}><i /></button></div> }
 
-function App() { const [page, setPage] = useState<Page>('ask'); const [collapsed, setCollapsed] = useState(false); const render = () => ({ask:<AskPage />, memory:<MemoryPage />, studio:<StudioPage />, risk:<RiskPage />, watchlist:<WatchlistPage />, cockpit:<CockpitPage />, sources:<SettingsPage page="sources" />, rules:<SettingsPage page="rules" />, audit:<SettingsPage page="audit" />}[page]); const [title, subtitle] = pageMeta[page]; return <div className={`app-shell ${collapsed ? 'collapsed' : ''}`}><aside><div className="brand"><span>R</span><div><b>RESEARCH OS</b><small>机构研究工作台</small></div><button onClick={() => setCollapsed(!collapsed)}>☰</button></div><nav>{navGroups.map(group => <div className="nav-group" key={group.label}><label>{group.label}</label>{group.items.map(([id, icon, text]) => <button key={id} onClick={() => setPage(id)} className={page === id ? 'active' : ''}><i>{icon}</i><span>{text}</span>{id === 'risk' && <em>2</em>}</button>)}</div>)}</nav><div className="user"><div className="avatar">LR</div><div><b>林然</b><small>研究负责人</small></div><span>⌄</span></div></aside><main><header><div><div className="breadcrumb">RESEARCH OS / {title}</div><h1>{title}</h1><p>{subtitle}</p></div><div className="header-actions"><button className="notice">◉<span>2</span></button><a className="status" href="http://10.15.0.27/platform/agents" target="_blank" rel="noreferrer"><i /> WeKnora 工作台 ↗</a></div></header><div className="page-content">{render()}</div></main></div> }
+function App() { const [page, setPage] = useState<Page>('ask'); const [collapsed, setCollapsed] = useState(false); const render = () => ({ask:<AskPage />, memory:<MemoryPage />, studio:<StudioPage />, risk:<RiskPage />, watchlist:<WatchlistPage />, cockpit:<CockpitPage />, sources:<SettingsPage page="sources" />, rules:<SettingsPage page="rules" />, audit:<SettingsPage page="audit" />}[page]); const [title, subtitle] = pageMeta[page]; return <div className={`app-shell ${collapsed ? 'collapsed' : ''}`}><aside><div className="brand"><span>R</span><div><b>RESEARCH OS</b><small>机构研究工作台</small></div><button onClick={() => setCollapsed(!collapsed)}>☰</button></div><nav>{navGroups.map(group => <div className="nav-group" key={group.label}><label>{group.label}</label>{group.items.map(([id, icon, text]) => <button key={id} onClick={() => setPage(id)} className={page === id ? 'active' : ''}><i>{icon}</i><span>{text}</span>{id === 'risk' && <em>2</em>}</button>)}</div>)}</nav><div className="user"><div className="avatar">LR</div><div><b>林然</b><small>研究负责人</small></div><span>⌄</span></div></aside><main><header><div><div className="breadcrumb">RESEARCH OS / {title}</div><h1>{title}</h1><p>{subtitle}</p></div><div className="header-actions"><button className="notice">◉<span>2</span></button><a className="status" href="http://10.15.0.27/platform/agents" target="_blank" rel="noreferrer"><i /> WeKnora 工作台 ↗</a></div></header><div className="page-content">{render()}</div><BuildFooter /></main></div> }
 
 export default App

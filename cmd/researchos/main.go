@@ -25,10 +25,36 @@ type askRequest struct {
 	Scope    string `json:"scope"`
 }
 
+const buildAuthor = "Yuhao@jiansutech.com"
+
+// These values are set by the production build through -ldflags. Keeping a
+// clear local-dev value makes development builds honest instead of guessing.
+var (
+	buildCommit     = "local-dev"
+	buildBranch     = "local-dev"
+	buildCommitTime = "local-dev"
+)
+
+type versionInfo struct {
+	Author     string `json:"author"`
+	CommitTime string `json:"commit_time"`
+	CommitID   string `json:"commit_id"`
+	Branch     string `json:"branch"`
+}
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func currentVersion() versionInfo {
+	return versionInfo{Author: buildAuthor, CommitTime: buildCommitTime, CommitID: buildCommit, Branch: buildBranch}
+}
+
+func versionHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, currentVersion())
 }
 
 func main() {
@@ -37,6 +63,7 @@ func main() {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "research-os"})
 	})
+	mux.HandleFunc("GET /api/v1/version", versionHandler)
 	mux.HandleFunc("GET /api/v1/research/reports", func(w http.ResponseWriter, _ *http.Request) {
 		// TODO(weknora): 由知识库检索与机构语义库组合查询替换。
 		writeJSON(w, http.StatusOK, []report{
