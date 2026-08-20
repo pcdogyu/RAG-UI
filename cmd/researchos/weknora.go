@@ -16,13 +16,15 @@ import (
 
 // WeKnoraConfig 从运行环境读取；账号、密码和 token 均不会写入文件或响应给浏览器。
 type WeKnoraConfig struct {
-	BaseURL         string
-	ConsoleURL      string
-	Email           string
-	Password        string
-	AgentID         string
-	KnowledgeBaseID string
-	UploadMaxBytes  int64
+	BaseURL             string
+	ConsoleURL          string
+	Email               string
+	Password            string
+	AgentID             string
+	MemoryAgentID       string
+	MemorySessionSecret string
+	KnowledgeBaseID     string
+	UploadMaxBytes      int64
 }
 
 func loadWeKnoraConfig() WeKnoraConfig {
@@ -31,13 +33,15 @@ func loadWeKnoraConfig() WeKnoraConfig {
 		baseURL = "http://10.15.0.27"
 	}
 	return WeKnoraConfig{
-		BaseURL:         baseURL,
-		ConsoleURL:      strings.TrimRight(os.Getenv("WEKNORA_CONSOLE_URL"), "/"),
-		Email:           os.Getenv("WEKNORA_EMAIL"),
-		Password:        os.Getenv("WEKNORA_PASSWORD"),
-		AgentID:         valueOrDefault(os.Getenv("WEKNORA_AGENT_ID"), "30a2f66f-7650-4cb0-a6f8-e64981b8a95d"),
-		KnowledgeBaseID: os.Getenv("WEKNORA_KNOWLEDGE_BASE_ID"),
-		UploadMaxBytes:  loadWeKnoraUploadMaxBytes(),
+		BaseURL:             baseURL,
+		ConsoleURL:          strings.TrimRight(os.Getenv("WEKNORA_CONSOLE_URL"), "/"),
+		Email:               os.Getenv("WEKNORA_EMAIL"),
+		Password:            os.Getenv("WEKNORA_PASSWORD"),
+		AgentID:             valueOrDefault(os.Getenv("WEKNORA_AGENT_ID"), "30a2f66f-7650-4cb0-a6f8-e64981b8a95d"),
+		MemoryAgentID:       strings.TrimSpace(os.Getenv("WEKNORA_MEMORY_AGENT_ID")),
+		MemorySessionSecret: strings.TrimSpace(os.Getenv("RESEARCH_MEMORY_SESSION_SECRET")),
+		KnowledgeBaseID:     os.Getenv("WEKNORA_KNOWLEDGE_BASE_ID"),
+		UploadMaxBytes:      loadWeKnoraUploadMaxBytes(),
 	}
 }
 
@@ -50,6 +54,10 @@ func valueOrDefault(value, fallback string) string {
 
 func (c WeKnoraConfig) enabled() bool {
 	return c.BaseURL != "" && c.Email != "" && c.Password != "" && c.AgentID != ""
+}
+
+func (c WeKnoraConfig) memoryAgentEnabled() bool {
+	return c.BaseURL != "" && c.Email != "" && c.Password != "" && c.MemoryAgentID != ""
 }
 
 type WeKnoraClient struct {
@@ -71,15 +79,26 @@ type weKnoraLogin struct {
 }
 
 type agentConfig struct {
-	MaxIterations  int      `json:"max_iterations"`
-	Temperature    float64  `json:"temperature"`
-	KnowledgeBases []string `json:"knowledge_bases"`
-	AllowedTools   []string `json:"allowed_tools"`
+	AgentMode              string   `json:"agent_mode"`
+	MaxIterations          int      `json:"max_iterations"`
+	Temperature            float64  `json:"temperature"`
+	KnowledgeBases         []string `json:"knowledge_bases"`
+	AllowedTools           []string `json:"allowed_tools"`
+	KBSelectionMode        string   `json:"kb_selection_mode"`
+	CitationEnabled        bool     `json:"citation_enabled"`
+	WebSearchEnabled       bool     `json:"web_search_enabled"`
+	MultiTurnEnabled       bool     `json:"multi_turn_enabled"`
+	RetainRetrievalHistory bool     `json:"retain_retrieval_history"`
+	HistoryTurns           int      `json:"history_turns"`
 }
 
 type agentDetail struct {
 	Data struct {
-		Config agentConfig `json:"config"`
+		ID          string      `json:"id"`
+		Name        string      `json:"name"`
+		Description string      `json:"description"`
+		Avatar      string      `json:"avatar"`
+		Config      agentConfig `json:"config"`
 	} `json:"data"`
 }
 
@@ -295,9 +314,14 @@ func (c *WeKnoraClient) login(ctx context.Context) (weKnoraLogin, error) {
 }
 
 func (c *WeKnoraClient) agentConfig(ctx context.Context, login weKnoraLogin) (agentConfig, error) {
+	detail, err := c.agentDetail(ctx, login, c.config.AgentID)
+	return detail.Data.Config, err
+}
+
+func (c *WeKnoraClient) agentDetail(ctx context.Context, login weKnoraLogin, agentID string) (agentDetail, error) {
 	var response agentDetail
-	err := c.json(ctx, http.MethodGet, "/api/v1/agents/"+url.PathEscape(c.config.AgentID), &login, nil, &response)
-	return response.Data.Config, err
+	err := c.json(ctx, http.MethodGet, "/api/v1/agents/"+url.PathEscape(agentID), &login, nil, &response)
+	return response, err
 }
 
 func (c *WeKnoraClient) createSession(ctx context.Context, login weKnoraLogin, config agentConfig) (string, error) {
@@ -313,8 +337,12 @@ func (c *WeKnoraClient) createSession(ctx context.Context, login weKnoraLogin, c
 }
 
 func (c *WeKnoraClient) streamAgentAnswer(ctx context.Context, login weKnoraLogin, sessionID, question string, knowledgeBases []string, useExternalLive bool) error {
+	return c.streamAgentAnswerFor(ctx, login, c.config.AgentID, sessionID, question, knowledgeBases, useExternalLive)
+}
+
+func (c *WeKnoraClient) streamAgentAnswerFor(ctx context.Context, login weKnoraLogin, agentID, sessionID, question string, knowledgeBases []string, useExternalLive bool) error {
 	payload := map[string]any{
-		"query": question, "agent_enabled": true, "agent_id": c.config.AgentID,
+		"query": question, "agent_enabled": true, "agent_id": agentID,
 		"web_search_enabled": useExternalLive, "channel": "web",
 	}
 	if len(knowledgeBases) > 0 {
@@ -354,19 +382,24 @@ func (c *WeKnoraClient) loadAnswer(ctx context.Context, login weKnoraLogin, sess
 		return WeKnoraAnswer{}, err
 	}
 	for index := len(messages.Data) - 1; index >= 0; index-- {
-		message := messages.Data[index]
-		if message.Role != "assistant" || !message.Completed {
-			continue
+		if answer, ok := answerFromStoredMessage(messages.Data[index]); ok {
+			return answer, nil
 		}
-		conclusion, taggedCitations := formatInternalKnowledgeTags(message.Content)
-		answer := WeKnoraAnswer{Conclusion: conclusion, Citations: taggedCitations, ToolCalls: toolCallsFromAgentSteps(message.AgentSteps)}
-		for _, reference := range message.References {
-			title := firstNonEmpty(reference.KnowledgeTitle, reference.KnowledgeFile, reference.ID, reference.KnowledgeID)
-			answer.Citations = appendUniqueCitation(answer.Citations, ResearchCitation{ID: firstNonEmpty(reference.ID, reference.KnowledgeID), Title: title, URL: reference.Metadata.URL, Source: "internal"})
-		}
-		return answer, nil
 	}
 	return WeKnoraAnswer{}, fmt.Errorf("WeKnora returned no completed assistant answer")
+}
+
+func answerFromStoredMessage(message storedMessage) (WeKnoraAnswer, bool) {
+	if message.Role != "assistant" || !message.Completed {
+		return WeKnoraAnswer{}, false
+	}
+	conclusion, taggedCitations := formatInternalKnowledgeTags(message.Content)
+	answer := WeKnoraAnswer{Conclusion: conclusion, Citations: taggedCitations, ToolCalls: toolCallsFromAgentSteps(message.AgentSteps)}
+	for _, reference := range message.References {
+		title := firstNonEmpty(reference.KnowledgeTitle, reference.KnowledgeFile, reference.ID, reference.KnowledgeID)
+		answer.Citations = appendUniqueCitation(answer.Citations, ResearchCitation{ID: firstNonEmpty(reference.ID, reference.KnowledgeID), Title: title, URL: reference.Metadata.URL, Source: "internal"})
+	}
+	return answer, true
 }
 
 func formatInternalKnowledgeTags(content string) (string, []ResearchCitation) {

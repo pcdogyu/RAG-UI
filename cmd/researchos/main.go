@@ -61,6 +61,7 @@ func versionHandler(w http.ResponseWriter, _ *http.Request) {
 func main() {
 	mux := http.NewServeMux()
 	weKnora := NewWeKnoraClient(loadWeKnoraConfig())
+	memoryAgent := newMemoryAgentService(weKnora)
 	watchlistBriefs := newWatchlistBriefService(weKnora)
 	liquidationStore, err := openLiquidationStore(context.Background(), os.Getenv("RAG_UI_DATABASE_URL"))
 	if err != nil {
@@ -88,6 +89,10 @@ func main() {
 	})
 	mux.HandleFunc("GET /api/v1/research/uploads", weKnora.serveResearchUploads)
 	mux.HandleFunc("POST /api/v1/research/uploads", weKnora.serveResearchUpload)
+	mux.HandleFunc("GET /api/v1/research/memory-agent", memoryAgent.serveInfo)
+	mux.HandleFunc("POST /api/v1/research/memory-agent/sessions", memoryAgent.serveCreateSession)
+	mux.HandleFunc("GET /api/v1/research/memory-agent/sessions/{session}", memoryAgent.serveMessages)
+	mux.HandleFunc("POST /api/v1/research/memory-agent/sessions/{session}/messages", memoryAgent.serveAsk)
 	mux.HandleFunc("GET /api/v1/watchlist/brief", watchlistBriefs.serveBrief)
 	mux.HandleFunc("POST /api/v1/research/ask", func(w http.ResponseWriter, r *http.Request) {
 		var request askRequest
