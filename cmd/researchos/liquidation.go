@@ -82,6 +82,36 @@ type candle struct {
 	Volume   float64   `json:"volume"`
 }
 
+func parseCandleInterval(value string) (string, time.Duration, bool) {
+	intervals := map[string]time.Duration{"5m": 5 * time.Minute, "15m": 15 * time.Minute, "1h": time.Hour}
+	if value == "" {
+		value = "5m"
+	}
+	duration, exists := intervals[value]
+	return value, duration, exists
+}
+
+func aggregateCandles(items []candle, interval string) []candle {
+	_, duration, ok := parseCandleInterval(interval)
+	if !ok || interval == "5m" || len(items) == 0 {
+		return items
+	}
+	aggregated := make([]candle, 0, len(items))
+	for _, item := range items {
+		openTime := item.OpenTime.UTC().Truncate(duration)
+		if len(aggregated) == 0 || !aggregated[len(aggregated)-1].OpenTime.Equal(openTime) {
+			aggregated = append(aggregated, candle{Symbol: item.Symbol, Interval: interval, OpenTime: openTime, Open: item.Open, High: item.High, Low: item.Low, Close: item.Close, Volume: item.Volume})
+			continue
+		}
+		current := &aggregated[len(aggregated)-1]
+		current.High = math.Max(current.High, item.High)
+		current.Low = math.Min(current.Low, item.Low)
+		current.Close = item.Close
+		current.Volume += item.Volume
+	}
+	return aggregated
+}
+
 type marketSymbol struct {
 	Symbol           string  `json:"symbol"`
 	BinanceSymbol    string  `json:"-"`
@@ -182,9 +212,11 @@ func (s *liquidationStore) saveCandle(ctx context.Context, item candle) error {
 	return err
 }
 
-func (s *liquidationStore) chart(ctx context.Context, symbol string, since time.Time, exchanges map[string]bool, filter liquidationFilter) ([]candle, []liquidationEvent, time.Time, error) {
+func (s *liquidationStore) chart(ctx context.Context, symbol string, since time.Time, interval string, exchanges map[string]bool, filter liquidationFilter) ([]candle, []liquidationEvent, time.Time, error) {
+	_, intervalDuration, _ := parseCandleInterval(interval)
+	candleSince := since.UTC().Truncate(intervalDuration)
 	candleRows, err := s.db.QueryContext(ctx, `SELECT symbol, interval, open_time, open, high, low, close, volume
-		FROM liquidation_candles WHERE symbol=$1 AND interval='5m' AND open_time >= $2 ORDER BY open_time`, symbol, since)
+		FROM liquidation_candles WHERE symbol=$1 AND interval='5m' AND open_time >= $2 ORDER BY open_time`, symbol, candleSince)
 	if err != nil {
 		return nil, nil, time.Time{}, err
 	}
@@ -237,7 +269,7 @@ func (s *liquidationStore) chart(ctx context.Context, symbol string, since time.
 	if err := s.db.QueryRowContext(ctx, `SELECT min(occurred_at) FROM liquidation_events`).Scan(&collectionStart); err != nil {
 		return nil, nil, time.Time{}, err
 	}
-	return candles, events, collectionStart.Time, nil
+	return aggregateCandles(candles, interval), events, collectionStart.Time, nil
 }
 
 func (s *liquidationStore) candleCount(ctx context.Context, symbol string, since time.Time) (int, error) {
@@ -1018,10 +1050,6 @@ func (s *liquidationService) serveStatus(w http.ResponseWriter, _ *http.Request)
 }
 
 func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "liquidation database is not configured"})
-		return
-	}
 	symbol := r.URL.Query().Get("symbol")
 	if !s.validSymbol(symbol) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown symbol"})
@@ -1030,6 +1058,11 @@ func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) 
 	since, window, ok := rangeStart(r.URL.Query().Get("range"))
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "range must be 1h, 4h, 8h, 12h, 24h, or 7d"})
+		return
+	}
+	interval, intervalDuration, ok := parseCandleInterval(r.URL.Query().Get("interval"))
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "interval must be 5m, 15m, or 1h"})
 		return
 	}
 	exchanges, ok := exchangesFromQuery(r.URL.Query().Get("exchanges"))
@@ -1042,18 +1075,23 @@ func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "filter must be notional or quantity with a positive min"})
 		return
 	}
-	minimumCandles := int(time.Since(since) / (5 * time.Minute) * 3 / 4)
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "liquidation database is not configured"})
+		return
+	}
+	candleSince := since.UTC().Truncate(intervalDuration)
+	minimumCandles := int(time.Since(candleSince) / (5 * time.Minute) * 3 / 4)
 	if minimumCandles < 1 {
 		minimumCandles = 1
 	}
-	if count, err := s.store.candleCount(r.Context(), symbol, since); err != nil {
+	if count, err := s.store.candleCount(r.Context(), symbol, candleSince); err != nil {
 		log.Printf("liquidation candle count: %v", err)
 	} else if count < minimumCandles {
-		if err := s.backfillCandles(r.Context(), symbol, since); err != nil {
+		if err := s.backfillCandles(r.Context(), symbol, candleSince); err != nil {
 			log.Printf("liquidation candle backfill: %v", err)
 		}
 	}
-	candles, events, collectionStart, err := s.store.chart(r.Context(), symbol, since, exchanges, filter)
+	candles, events, collectionStart, err := s.store.chart(r.Context(), symbol, since, interval, exchanges, filter)
 	if err != nil {
 		log.Printf("liquidation chart: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to load liquidation chart"})
@@ -1063,7 +1101,7 @@ func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) 
 	if !collectionStart.IsZero() {
 		collectionStartedAt = collectionStart
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"symbol": symbol, "range": window, "collectionStartedAt": collectionStartedAt, "candles": candles, "events": events, "status": s.statusSnapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"symbol": symbol, "range": window, "interval": interval, "collectionStartedAt": collectionStartedAt, "candles": candles, "events": events, "status": s.statusSnapshot()})
 }
 
 func (s *liquidationService) serveLiveWS(w http.ResponseWriter, r *http.Request) {

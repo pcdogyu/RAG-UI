@@ -150,6 +150,37 @@ func TestRangeAndVenueValidation(t *testing.T) {
 	}
 }
 
+func TestCandleIntervalValidationAndAggregation(t *testing.T) {
+	for _, value := range []string{"5m", "15m", "1h"} {
+		interval, _, ok := parseCandleInterval(value)
+		if !ok || interval != value {
+			t.Fatalf("interval %q was not accepted", value)
+		}
+	}
+	if _, _, ok := parseCandleInterval("30m"); ok {
+		t.Fatal("unexpected accepted candle interval")
+	}
+	base := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	raw := []candle{
+		{Symbol: "ETH-USDT", Interval: "5m", OpenTime: base, Open: 100, High: 103, Low: 99, Close: 102, Volume: 2},
+		{Symbol: "ETH-USDT", Interval: "5m", OpenTime: base.Add(5 * time.Minute), Open: 102, High: 105, Low: 101, Close: 104, Volume: 3},
+		{Symbol: "ETH-USDT", Interval: "5m", OpenTime: base.Add(10 * time.Minute), Open: 104, High: 106, Low: 103, Close: 105, Volume: 5},
+		{Symbol: "ETH-USDT", Interval: "5m", OpenTime: base.Add(15 * time.Minute), Open: 105, High: 108, Low: 104, Close: 107, Volume: 7},
+	}
+	fifteenMinute := aggregateCandles(raw, "15m")
+	if len(fifteenMinute) != 2 {
+		t.Fatalf("15m candles = %d, want 2", len(fifteenMinute))
+	}
+	first := fifteenMinute[0]
+	if first.Interval != "15m" || !first.OpenTime.Equal(base) || first.Open != 100 || first.High != 106 || first.Low != 99 || first.Close != 105 || first.Volume != 10 {
+		t.Fatalf("unexpected 15m candle: %+v", first)
+	}
+	hourly := aggregateCandles(raw, "1h")
+	if len(hourly) != 1 || hourly[0].Interval != "1h" || hourly[0].Open != 100 || hourly[0].High != 108 || hourly[0].Low != 99 || hourly[0].Close != 107 || hourly[0].Volume != 17 {
+		t.Fatalf("unexpected 1h candle: %+v", hourly)
+	}
+}
+
 func TestLiquidationFilterValidationAndMatching(t *testing.T) {
 	notional, ok := parseLiquidationFilter(map[string][]string{"filter": {"notional"}, "min": {"5000"}})
 	if !ok || !notional.matches(liquidationEvent{Price: 2500, Notional: 5000}) || notional.matches(liquidationEvent{Price: 2500, Notional: 4999}) {
@@ -194,5 +225,12 @@ func TestLiquidationHTTPStatusWithoutDatabase(t *testing.T) {
 	service.serveChart(chartResponse, chartRequest)
 	if chartResponse.Code != http.StatusServiceUnavailable {
 		t.Fatalf("chart status = %d, want %d", chartResponse.Code, http.StatusServiceUnavailable)
+	}
+
+	invalidIntervalRequest := httptest.NewRequest(http.MethodGet, "/api/v1/liquidations/chart?symbol=ETH-USDT&interval=30m", nil)
+	invalidIntervalResponse := httptest.NewRecorder()
+	service.serveChart(invalidIntervalResponse, invalidIntervalRequest)
+	if invalidIntervalResponse.Code != http.StatusBadRequest || !strings.Contains(invalidIntervalResponse.Body.String(), "interval must be") {
+		t.Fatalf("invalid interval response = %d %s", invalidIntervalResponse.Code, invalidIntervalResponse.Body.String())
 	}
 }
