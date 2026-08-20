@@ -17,10 +17,12 @@ import (
 // WeKnoraConfig 从运行环境读取；账号、密码和 token 均不会写入文件或响应给浏览器。
 type WeKnoraConfig struct {
 	BaseURL         string
+	ConsoleURL      string
 	Email           string
 	Password        string
 	AgentID         string
 	KnowledgeBaseID string
+	UploadMaxBytes  int64
 }
 
 func loadWeKnoraConfig() WeKnoraConfig {
@@ -30,10 +32,12 @@ func loadWeKnoraConfig() WeKnoraConfig {
 	}
 	return WeKnoraConfig{
 		BaseURL:         baseURL,
+		ConsoleURL:      strings.TrimRight(os.Getenv("WEKNORA_CONSOLE_URL"), "/"),
 		Email:           os.Getenv("WEKNORA_EMAIL"),
 		Password:        os.Getenv("WEKNORA_PASSWORD"),
 		AgentID:         valueOrDefault(os.Getenv("WEKNORA_AGENT_ID"), "30a2f66f-7650-4cb0-a6f8-e64981b8a95d"),
 		KnowledgeBaseID: os.Getenv("WEKNORA_KNOWLEDGE_BASE_ID"),
+		UploadMaxBytes:  loadWeKnoraUploadMaxBytes(),
 	}
 }
 

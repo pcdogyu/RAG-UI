@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts/core'
 import { CandlestickChart, ScatterChart } from 'echarts/charts'
 import { DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
@@ -123,7 +123,54 @@ function MemoryPage() {
 
 function ReportDetail({ report }: { report: Report }) { return <Card className="report-detail"><div className="detail-top"><Pill tone={report.status === '当前有效' ? 'green' : 'amber'}>{report.status}</Pill><button className="ghost">打开原文 ↗</button></div><h2>{report.title}</h2><p className="detail-meta">{report.asset} · 数据截止 {report.date} · 版本 v2.3</p><div className="detail-section"><label>AI 结构化摘要</label><p>{report.summary}</p></div><div className="detail-section"><label>核心投资命题</label><p>{report.thesis}</p></div><div className="detail-section"><label>失效条件</label><p>{report.invalidation}</p></div><div className="detail-section"><label>证据与时间锚点</label>{report.evidence.map(x => <div className="evidence" key={x}><span>◆</span>{x}</div>)}</div><div className="version-line"><b>版本脉络</b><span>06-18 ETH 中期展望</span><i /> <strong>08-10 当前报告</strong></div></Card> }
 
-function StudioPage() { const [decision, setDecision] = useState<string | null>(null); return <div className="two-columns"><Card><div className="card-heading"><div><div className="eyebrow">INGESTION QUEUE</div><h2>待处理研究材料</h2></div><button className="primary">+ 上传报告</button></div><div className="upload-drop">⌁<b>拖放或选择 PDF / Word / PPT</b><span>文件先进入 WeKnora 知识库，结构化解析在后台进行</span></div>{['半导体月度跟踪 · 08-12.pdf', '美国 CPI 事件复盘.docx'].map((x, i) => <div className="queue" key={x}><span className="file-icon">{i ? 'W' : 'P'}</span><div><b>{x}</b><p>{i ? '等待分类' : 'AI 正在抽取研究对象与标签'}</p></div><Pill tone={i ? 'amber' : 'violet'}>{i ? '需确认' : '处理中'}</Pill></div>)}</Card><Card><div className="eyebrow">GOVERNANCE · 01 PENDING</div><h2>观点演变确认</h2><p className="conflict-copy">新报告《ETH 8 月综合研判》与 6 月《ETH 中期展望》在“质押解锁影响”上判断相反。</p><div className="conflict"><span>旧观点</span><b>供给扰动将压制反弹高度</b><span>新观点</span><b>中期结构未破坏，短线受杠杆主导</b></div>{decision ? <div className="decision-done">✓ 已记录裁决：{decision}</div> : <div className="decision-buttons"><button onClick={() => setDecision('更新旧观点')}>更新旧观点</button><button onClick={() => setDecision('两者并存')}>两者并存</button><button onClick={() => setDecision('AI 识别误判')}>驳回提示</button></div>}<p className="fine-print">AI 只负责发现矛盾；最终裁决权属于研究负责人。</p></Card></div> }
+type ResearchUpload = { id: string, name: string, file_type: string, size: number, created_at: string, parse_status: string, error_message?: string }
+type ResearchUploadsResponse = { uploads?: ResearchUpload[], console_url?: string, error?: string }
+
+const researchUploadAccept = '.pdf,.doc,.docx,.ppt,.pptx'
+const formatUploadSize = (size: number) => size >= 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MB` : `${Math.max(0, Math.round(size / 1024))} KB`
+const uploadStatus = (status: string) => ({
+  pending: ['等待处理', 'muted'], processing: ['处理中', 'violet'], finalizing: ['整理索引中', 'violet'], completed: ['已入库', 'green'], failed: ['处理失败', 'red'], cancelled: ['已取消', 'amber'],
+}[status] ?? ['等待处理', 'muted'])
+const isUploadProcessing = (status: string) => ['pending', 'processing', 'finalizing'].includes(status)
+
+function StudioPage() {
+  const input = useRef<HTMLInputElement>(null); const [decision, setDecision] = useState<string | null>(null); const [uploads, setUploads] = useState<ResearchUpload[]>([]); const [consoleURL, setConsoleURL] = useState(''); const [loading, setLoading] = useState(true); const [uploadingName, setUploadingName] = useState(''); const [error, setError] = useState(''); const [dragging, setDragging] = useState(false)
+  const loadUploads = useCallback(async (quiet = false, signal?: AbortSignal) => {
+    if (!quiet) setLoading(true)
+    try {
+      const response = await fetch('/api/v1/research/uploads', { signal })
+      const result = await response.json().catch(() => null) as ResearchUploadsResponse | null
+      if (!response.ok) throw new Error(result?.error || '无法读取 WeKnora 上传记录')
+      setUploads(result?.uploads ?? []); setConsoleURL(result?.console_url ?? ''); setError('')
+    } catch (requestError) {
+      if ((requestError as Error).name !== 'AbortError') setError(requestError instanceof Error ? requestError.message : '无法读取 WeKnora 上传记录')
+    } finally {
+      if (!quiet && !signal?.aborted) setLoading(false)
+    }
+  }, [])
+  useEffect(() => { const controller = new AbortController(); void loadUploads(false, controller.signal); return () => controller.abort() }, [loadUploads])
+  const hasProcessing = uploads.some(upload => isUploadProcessing(upload.parse_status))
+  useEffect(() => { if (!hasProcessing) return; const timer = window.setInterval(() => { void loadUploads(true) }, 10_000); return () => window.clearInterval(timer) }, [hasProcessing, loadUploads])
+  const uploadFile = async (file?: File) => {
+    if (!file || uploadingName) return
+    const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`
+    if (!researchUploadAccept.split(',').includes(extension)) { setError('仅支持 PDF、Word 或 PPT 文件'); return }
+    setUploadingName(file.name); setError('')
+    try {
+      const payload = new FormData(); payload.append('file', file)
+      const response = await fetch('/api/v1/research/uploads', { method: 'POST', body: payload })
+      const result = await response.json().catch(() => null) as { error?: string } | null
+      if (!response.ok) throw new Error(result?.error || '文件未能提交至 WeKnora 知识库')
+      await loadUploads(true)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '文件未能提交至 WeKnora 知识库')
+    } finally {
+      setUploadingName(''); if (input.current) input.current.value = ''
+    }
+  }
+  const dropFile = (event: React.DragEvent<HTMLDivElement>) => { event.preventDefault(); setDragging(false); void uploadFile(event.dataTransfer.files[0]) }
+  return <div className="two-columns"><Card><div className="card-heading"><div><div className="eyebrow">WEKNORA · INGESTION QUEUE</div><h2>待处理研究材料</h2></div><div className="studio-actions"><button className="ghost studio-link" type="button" disabled={!consoleURL} onClick={() => window.open(consoleURL, '_blank', 'noopener,noreferrer')}>在 WeKnora 中打开 ↗</button><button className="primary" type="button" disabled={Boolean(uploadingName)} onClick={() => input.current?.click()}>+ 上传报告</button></div></div><div className={`upload-drop ${dragging ? 'dragging' : ''} ${uploadingName ? 'uploading' : ''}`} role="button" tabIndex={0} aria-label="上传至 WeKnora 知识库" onClick={() => !uploadingName && input.current?.click()} onKeyDown={event => { if ((event.key === 'Enter' || event.key === ' ') && !uploadingName) { event.preventDefault(); input.current?.click() } }} onDragEnter={event => { event.preventDefault(); setDragging(true) }} onDragOver={event => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={dropFile}><input ref={input} className="upload-input" type="file" accept={researchUploadAccept} onChange={event => void uploadFile(event.target.files?.[0])} /><span className="upload-mark">⌁</span><b>{uploadingName ? `正在提交 ${uploadingName}` : '拖放或选择 PDF / Word / PPT'}</b><span>{uploadingName ? 'WeKnora 正在接收文件…' : '文件将进入 WeKnora 知识库，结构化解析在后台进行'}</span></div>{error && <div className="upload-error" role="alert">{error}</div>}<div className="upload-history-heading"><b>最近上传文件</b><span>当前 WeKnora 知识库 · 最多 10 条</span></div>{loading ? <div className="upload-history-empty">正在读取 WeKnora 上传记录…</div> : uploads.length === 0 ? <div className="upload-history-empty">暂无文件。上传首份研究材料后会显示在这里。</div> : uploads.map(upload => { const [label, tone] = uploadStatus(upload.parse_status); return <div className="queue" key={upload.id}><span className="file-icon">{upload.file_type.slice(0, 1) || 'F'}</span><div><b>{upload.name}</b><p>{formatUploadSize(upload.size)} · {new Date(upload.created_at).toLocaleString()} {upload.error_message ? `· ${upload.error_message}` : ''}</p></div><Pill tone={tone}>{label}</Pill></div> })}</Card><Card><div className="eyebrow">GOVERNANCE · 01 PENDING</div><h2>观点演变确认</h2><p className="conflict-copy">新报告《ETH 8 月综合研判》与 6 月《ETH 中期展望》在“质押解锁影响”上判断相反。</p><div className="conflict"><span>旧观点</span><b>供给扰动将压制反弹高度</b><span>新观点</span><b>中期结构未破坏，短线受杠杆主导</b></div>{decision ? <div className="decision-done">✓ 已记录裁决：{decision}</div> : <div className="decision-buttons"><button onClick={() => setDecision('更新旧观点')}>更新旧观点</button><button onClick={() => setDecision('两者并存')}>两者并存</button><button onClick={() => setDecision('AI 识别误判')}>驳回提示</button></div>}<p className="fine-print">AI 只负责发现矛盾；最终裁决权属于研究负责人。</p></Card></div>
+}
 
 function RiskPage() {
   const liquidationMonitorURL = 'http://10.15.0.6/monitor?days=30'

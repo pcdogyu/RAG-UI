@@ -85,6 +85,8 @@ func main() {
 			{ID: "nvda-0808", Title: "NVDA 财报前预期差跟踪", Asset: "NVDA", Status: "当前有效", Deadline: "2026-08-08"},
 		})
 	})
+	mux.HandleFunc("GET /api/v1/research/uploads", weKnora.serveResearchUploads)
+	mux.HandleFunc("POST /api/v1/research/uploads", weKnora.serveResearchUpload)
 	mux.HandleFunc("POST /api/v1/research/ask", func(w http.ResponseWriter, r *http.Request) {
 		var request askRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&request); err != nil || strings.TrimSpace(request.Question) == "" {

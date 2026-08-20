@@ -42,6 +42,10 @@ $env:WEKNORA_PASSWORD = 'your-weknora-password'
 $env:WEKNORA_AGENT_ID = '30a2f66f-7650-4cb0-a6f8-e64981b8a95d'
 # 可选：限定为 HYGR投研工作台当前选定的“机构研究记忆”知识库。
 $env:WEKNORA_KNOWLEDGE_BASE_ID = '1006a6d7-5baa-42e0-b0c7-ed7908dbe507'
+# 可选：研究工作区“在 WeKnora 中打开”使用的控制台地址；未设置时使用 WEKNORA_BASE_URL。
+$env:WEKNORA_CONSOLE_URL = 'http://10.15.0.27'
+# 可选：研究工作区单文件上传上限（MB，默认 50）；应与 WeKnora 的 MAX_FILE_SIZE_MB 保持一致。
+$env:RAG_UI_UPLOAD_MAX_MB = '50'
 ```
 
 爆仓气泡图使用 Binance、OKX 的公开行情 WebSocket，不需要交易 API Key。生产环境需为持久化数据配置一个最小权限 PostgreSQL 账号，并仅在部署环境中设置 DSN：
@@ -59,5 +63,6 @@ $env:LIQUIDATION_RETENTION_HOURS = '168'
 
 - `GET /api/v1/research/reports`：研究记忆页的演示数据接口，后续可对接机构语义库。
 - `POST /api/v1/research/ask`：登录 WeKnora、读取 HYGR投研工作台配置、创建会话、消费 SSE 响应，再返回完整回答与引用；页面的“仅内部 / 内部 + 实时 / 仅原始来源”会作为明确的检索指令传入智能体。
+- `GET /api/v1/research/uploads`、`POST /api/v1/research/uploads`：固定使用已配置的 WeKnora 知识库列出最近 10 个文件、上传单个 PDF/Word/PPT 文件；凭据和知识库 ID 不会返回浏览器。
 - 智能问答在 WeKnora 未配置或故障时会明确报错，不会把演示内容伪装成生产研究结果。
 - `GET /api/v1/liquidations/symbols`、`/status`、`/chart` 和 `/stream`：爆仓气泡图的只读目录、采集状态、历史快照与浏览器实时推送接口。
