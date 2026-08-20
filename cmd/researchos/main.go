@@ -61,6 +61,7 @@ func versionHandler(w http.ResponseWriter, _ *http.Request) {
 func main() {
 	mux := http.NewServeMux()
 	weKnora := NewWeKnoraClient(loadWeKnoraConfig())
+	watchlistBriefs := newWatchlistBriefService(weKnora)
 	liquidationStore, err := openLiquidationStore(context.Background(), os.Getenv("RAG_UI_DATABASE_URL"))
 	if err != nil {
 		log.Printf("liquidation database disabled: %v", err)
@@ -87,6 +88,7 @@ func main() {
 	})
 	mux.HandleFunc("GET /api/v1/research/uploads", weKnora.serveResearchUploads)
 	mux.HandleFunc("POST /api/v1/research/uploads", weKnora.serveResearchUpload)
+	mux.HandleFunc("GET /api/v1/watchlist/brief", watchlistBriefs.serveBrief)
 	mux.HandleFunc("POST /api/v1/research/ask", func(w http.ResponseWriter, r *http.Request) {
 		var request askRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&request); err != nil || strings.TrimSpace(request.Question) == "" {
