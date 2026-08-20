@@ -109,6 +109,7 @@ type messagesResponse struct {
 type WeKnoraAnswer struct {
 	Conclusion string             `json:"conclusion"`
 	Citations  []ResearchCitation `json:"citations"`
+	ToolCalls  []ResearchToolCall `json:"tool_calls"`
 }
 
 type ResearchCitation struct {
@@ -117,17 +118,59 @@ type ResearchCitation struct {
 	URL   string `json:"url,omitempty"`
 }
 
+// ResearchToolCall is a non-sensitive audit entry for a real research request.
+// It deliberately excludes credentials, tokens, session IDs, and request text.
+type ResearchToolCall struct {
+	Name       string    `json:"name"`
+	Detail     string    `json:"detail"`
+	StartedAt  time.Time `json:"started_at"`
+	DurationMS int64     `json:"duration_ms"`
+	Status     string    `json:"status"`
+}
+
+type researchCallRecorder struct {
+	calls []ResearchToolCall
+}
+
+func (r *researchCallRecorder) record(name, detail string, action func() error) error {
+	startedAt := time.Now().UTC()
+	err := action()
+	status := "completed"
+	if err != nil {
+		status = "failed"
+	}
+	r.calls = append(r.calls, ResearchToolCall{
+		Name:       name,
+		Detail:     detail,
+		StartedAt:  startedAt,
+		DurationMS: time.Since(startedAt).Milliseconds(),
+		Status:     status,
+	})
+	return err
+}
+
 func (c *WeKnoraClient) Ask(ctx context.Context, question, scope string) (WeKnoraAnswer, error) {
 	if !c.config.enabled() {
 		return WeKnoraAnswer{}, fmt.Errorf("WeKnora is not configured")
 	}
-	login, err := c.login(ctx)
+	recorder := researchCallRecorder{}
+	var login weKnoraLogin
+	err := recorder.record("身份授权", "向 HYGR 智能问答建立当前请求的授权上下文", func() error {
+		var loginErr error
+		login, loginErr = c.login(ctx)
+		return loginErr
+	})
 	if err != nil {
-		return WeKnoraAnswer{}, err
+		return WeKnoraAnswer{ToolCalls: recorder.calls}, err
 	}
-	config, err := c.agentConfig(ctx, login)
+	var config agentConfig
+	err = recorder.record("读取智能体配置", "加载已授权的 HYGR 投研工作台工具与知识库配置", func() error {
+		var configErr error
+		config, configErr = c.agentConfig(ctx, login)
+		return configErr
+	})
 	if err != nil {
-		return WeKnoraAnswer{}, err
+		return WeKnoraAnswer{ToolCalls: recorder.calls}, err
 	}
 	if c.config.KnowledgeBaseID != "" {
 		config.KnowledgeBases = []string{c.config.KnowledgeBaseID}
@@ -139,14 +182,36 @@ func (c *WeKnoraClient) Ask(ctx context.Context, question, scope string) (WeKnor
 		config.AllowedTools = []string{"knowledge_search"}
 	}
 
-	sessionID, err := c.createSession(ctx, login, config)
+	var sessionID string
+	err = recorder.record("创建研究会话", "为本次问题建立独立的 HYGR 研究会话", func() error {
+		var sessionErr error
+		sessionID, sessionErr = c.createSession(ctx, login, config)
+		return sessionErr
+	})
 	if err != nil {
-		return WeKnoraAnswer{}, err
+		return WeKnoraAnswer{ToolCalls: recorder.calls}, err
 	}
-	if err := c.streamAgentAnswer(ctx, login, sessionID, scopedQuestion(question, scope), config.KnowledgeBases); err != nil {
-		return WeKnoraAnswer{}, err
+	tools := strings.Join(config.AllowedTools, "、")
+	if tools == "" {
+		tools = "由智能体默认配置决定"
 	}
-	return c.loadAnswer(ctx, login, sessionID)
+	err = recorder.record("智能体检索与生成", fmt.Sprintf("检索范围：%s；知识库：%d 个；可用工具：%s", scope, len(config.KnowledgeBases), tools), func() error {
+		return c.streamAgentAnswer(ctx, login, sessionID, scopedQuestion(question, scope), config.KnowledgeBases)
+	})
+	if err != nil {
+		return WeKnoraAnswer{ToolCalls: recorder.calls}, err
+	}
+	var answer WeKnoraAnswer
+	err = recorder.record("加载研究回答", "读取已完成的回答与可展示引用", func() error {
+		var answerErr error
+		answer, answerErr = c.loadAnswer(ctx, login, sessionID)
+		return answerErr
+	})
+	answer.ToolCalls = recorder.calls
+	if err != nil {
+		return answer, err
+	}
+	return answer, nil
 }
 
 // scopedQuestion turns the page's retrieval mode into an explicit request for

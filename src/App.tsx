@@ -43,10 +43,12 @@ function BuildFooter() {
 }
 
 function AskPage() {
+  type ToolCall = { name: string, detail: string, started_at: string, duration_ms: number, status: 'completed' | 'failed' }
   const [scope, setScope] = useState('内部 + 实时')
   const [question, setQuestion] = useState('')
   const [answer, setAnswer] = useState<string | null>(null)
   const [citations, setCitations] = useState<{ id: string, title: string, url?: string }[]>([])
+  const [toolCalls, setToolCalls] = useState<ToolCall[]>([])
   const [answerSource, setAnswerSource] = useState('')
   const [answerScope, setAnswerScope] = useState('')
   const [answeredQuestion, setAnsweredQuestion] = useState('')
@@ -59,14 +61,16 @@ function AskPage() {
     setError(null)
     setAnswer(null)
     setCitations([])
+    setToolCalls([])
     setAnswerSource('')
     setAnswerScope('')
     try {
       const response = await fetch('/api/v1/research/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: normalizedQuestion, scope }) })
-      const result = await response.json().catch(() => null) as { error?: string, source?: string, answer?: { conclusion?: string, citations?: { id: string, title: string, url?: string }[] } } | null
+      const result = await response.json().catch(() => null) as { error?: string, source?: string, answer?: { conclusion?: string, citations?: { id: string, title: string, url?: string }[], tool_calls?: ToolCall[] } } | null
       if (!response.ok || !result?.answer?.conclusion) throw new Error(result?.error || 'HYGR 未返回可展示的研究回答，请稍后重试。')
       setAnswer(result.answer.conclusion)
       setCitations(result.answer.citations ?? [])
+      setToolCalls(result.answer.tool_calls ?? [])
       setAnswerScope(scope)
       setAnsweredQuestion(normalizedQuestion)
       setAnswerSource(result.source === 'weknora-agent' ? 'HYGR 智能问答' : '研究服务')
@@ -93,6 +97,11 @@ function AskPage() {
       <div className="question-label">{answeredQuestion}</div>
       <div className="answer-content"><h4>研究回答</h4><p>{answer}</p></div>
       <div className="citations"><span>检索引用</span>{citations.length ? citations.map((citation, i) => citation.url ? <a key={citation.id || citation.title} href={citation.url} target="_blank" rel="noreferrer">[{i + 1}] {citation.title}</a> : <span className="citation-chip" key={citation.id || citation.title}>[{i + 1}] {citation.title}</span>) : <span className="no-citation">本次回答未返回可展示的引用。</span>}</div>
+      <details className="tool-history" open>
+        <summary>调用历史 <span>{toolCalls.length} 步</span></summary>
+        <p className="tool-history-note">记录本次研究请求的真实服务调用；不展示令牌、密码、会话 ID 或问题原文。</p>
+        {toolCalls.length ? <ol>{toolCalls.map((call, index) => <li key={`${call.name}-${call.started_at}-${index}`}><span className={`tool-call-status ${call.status}`} /><div><b>{call.name}</b><p>{call.detail}</p></div><time>{new Date(call.started_at).toLocaleTimeString()} · {call.duration_ms} ms</time></li>)}</ol> : <p className="tool-history-empty">本次回答未返回调用记录。</p>}
+      </details>
     </Card>}
   </div>
 }
