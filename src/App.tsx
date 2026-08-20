@@ -44,7 +44,8 @@ function BuildFooter() {
   }, [])
   if (unavailable) return <footer className="build-footer">版本信息不可用</footer>
   if (!version) return <footer className="build-footer">版本信息加载中…</footer>
-  return <footer className="build-footer">Code by {version.author} · Commit time: {version.commit_time} · Commit: {version.commit_id} · Branch: {version.branch}</footer>
+  const commitTime = version.commit_time.replace(/(?:Z|[+-]\d{2}:\d{2})$/, '')
+  return <footer className="build-footer">Code by {version.author} · {commitTime} · {version.commit_id} · {version.branch}</footer>
 }
 
 function AskPage() {
