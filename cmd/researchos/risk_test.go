@@ -23,6 +23,10 @@ func TestRiskHistoryRange(t *testing.T) {
 	if _, _, ok := riskHistoryRange("2h"); ok {
 		t.Fatal("unsupported history range was accepted")
 	}
+	name, duration, ok = riskHistoryRange("12h")
+	if !ok || name != "12h" || duration != 12*time.Hour {
+		t.Fatalf("12h history range = %q, %s, %v", name, duration, ok)
+	}
 }
 
 func TestTopForecastLevelsSeparatesLongAndShort(t *testing.T) {

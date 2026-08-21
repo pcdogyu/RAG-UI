@@ -789,7 +789,7 @@ func riskHistoryRange(value string) (string, time.Duration, bool) {
 	if value == "" {
 		value = "24h"
 	}
-	durations := map[string]time.Duration{"4h": 4 * time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour}
+	durations := map[string]time.Duration{"1h": time.Hour, "4h": 4 * time.Hour, "12h": 12 * time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour}
 	duration, valid := durations[value]
 	return value, duration, valid
 }
@@ -862,7 +862,7 @@ func (s *riskService) serveHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	rangeName, duration, valid := riskHistoryRange(strings.TrimSpace(r.URL.Query().Get("range")))
 	if !valid {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "range must be one of 4h, 24h, 7d"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "range must be one of 1h, 4h, 12h, 24h, 7d"})
 		return
 	}
 	snapshots, err := s.historyForRange(r.Context(), riskETHSymbol, duration)

@@ -4,7 +4,7 @@ import { directionalLevels, ethRiskSymbol, riskRanges } from './riskRadar'
 describe('ETH risk radar view model', () => {
   it('keeps the radar fixed to ETH and exposes the supported chart ranges', () => {
     expect(ethRiskSymbol).toBe('ETH-USDT')
-    expect(riskRanges).toEqual(['4h', '24h', '7d'])
+    expect(riskRanges).toEqual(['1h', '4h', '12h', '24h', '7d'])
   })
 
   it('separates long and short liquidation levels for rendering', () => {
