@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { directionalLevels, ethRiskSymbol, riskRanges } from './riskRadar'
+import { activeRiskSignalCount, directionalLevels, ethRiskSymbol, riskRanges } from './riskRadar'
 
 describe('ETH risk radar view model', () => {
   it('keeps the radar fixed to ETH and exposes the supported chart ranges', () => {
@@ -11,5 +11,10 @@ describe('ETH risk radar view model', () => {
     const levels = [{ side: 'long', price: 2200 }, { side: 'short', price: 2500 }, { side: 'long', price: 2100 }]
     expect(directionalLevels(levels, 'long').map(item => item.price)).toEqual([2200, 2100])
     expect(directionalLevels(levels, 'short').map(item => item.price)).toEqual([2500])
+  })
+
+  it('counts current triggered factors for shared alert badges', () => {
+    expect(activeRiskSignalCount([{ active: false }, { active: true }, { active: false }])).toBe(1)
+    expect(activeRiskSignalCount(undefined)).toBe(0)
   })
 })
