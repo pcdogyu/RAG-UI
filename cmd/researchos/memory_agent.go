@@ -21,8 +21,9 @@ const (
 )
 
 var (
-	errMemoryAgentNotConfigured = errors.New("research memory agent is not configured")
-	errInvalidMemorySession     = errors.New("invalid research memory session")
+	errMemoryAgentNotConfigured          = errors.New("research memory agent is not configured")
+	errMemoryAgentDirectoryNotConfigured = errors.New("research memory agent directory is not configured")
+	errInvalidMemorySession              = errors.New("invalid research memory session")
 )
 
 type memoryAgentService struct {
@@ -44,6 +45,17 @@ type memoryAgentInfo struct {
 	Description  string                  `json:"description"`
 	Avatar       string                  `json:"avatar"`
 	Capabilities []memoryAgentCapability `json:"capabilities"`
+}
+
+// memoryAgentDirectoryItem is the safe browser-facing representation of a
+// WeKnora platform agent. It intentionally omits config, tenant, owner and
+// timestamp fields returned by the upstream API.
+type memoryAgentDirectoryItem struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Avatar      string `json:"avatar"`
+	IsBuiltin   bool   `json:"is_builtin"`
 }
 
 type memorySessionRequest struct {
@@ -115,6 +127,38 @@ func memoryScope(scope string) (researchScope, error) {
 
 func (s *memoryAgentService) enabled() bool {
 	return s != nil && s.client != nil && s.client.config.memoryAgentEnabled()
+}
+
+func (s *memoryAgentService) directoryEnabled() bool {
+	return s != nil && s.client != nil && s.client.config.BaseURL != "" && s.client.config.Email != "" && s.client.config.Password != ""
+}
+
+func (s *memoryAgentService) listDirectory(ctx context.Context) ([]memoryAgentDirectoryItem, string, error) {
+	if !s.directoryEnabled() {
+		return nil, "", errMemoryAgentDirectoryNotConfigured
+	}
+	login, err := s.client.login(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	agents, err := s.client.listAgents(ctx, login)
+	if err != nil {
+		return nil, "", err
+	}
+	items := make([]memoryAgentDirectoryItem, 0, len(agents))
+	for _, agent := range agents {
+		if strings.TrimSpace(agent.ID) == "" || strings.TrimSpace(agent.Name) == "" {
+			continue
+		}
+		items = append(items, memoryAgentDirectoryItem{
+			ID:          agent.ID,
+			Name:        agent.Name,
+			Description: agent.Description,
+			Avatar:      agent.Avatar,
+			IsBuiltin:   agent.IsBuiltin,
+		})
+	}
+	return items, strings.TrimRight(s.client.config.consoleURL(), "/") + "/platform/agents", nil
 }
 
 func (s *memoryAgentService) agentInfo(ctx context.Context) (memoryAgentInfo, error) {
@@ -243,6 +287,19 @@ func (s *memoryAgentService) serveInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"agent": info, "source": "weknora-memory-agent"})
 }
 
+func (s *memoryAgentService) serveDirectory(w http.ResponseWriter, r *http.Request) {
+	agents, consoleURL, err := s.listDirectory(r.Context())
+	if err != nil {
+		writeMemoryAgentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"agents":      agents,
+		"console_url": consoleURL,
+		"source":      "weknora-agent-directory",
+	})
+}
+
 func (s *memoryAgentService) serveCreateSession(w http.ResponseWriter, r *http.Request) {
 	sessionID, err := s.createSession(r.Context())
 	if err != nil {
@@ -292,6 +349,8 @@ func (s *memoryAgentService) serveAsk(w http.ResponseWriter, r *http.Request) {
 
 func writeMemoryAgentError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, errMemoryAgentDirectoryNotConfigured):
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "WeKnora 智能体目录未连接，请联系管理员完成配置"})
 	case errors.Is(err, errMemoryAgentNotConfigured):
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "研究记忆智能体未连接，请联系管理员完成配置"})
 	case errors.Is(err, errInvalidMemorySession):

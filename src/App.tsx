@@ -4,6 +4,7 @@ import { CandlestickChart, ScatterChart } from 'echarts/charts'
 import { DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { navGroups, reports } from './data'
+import { groupDirectoryAgents, type DirectoryAgent } from './agentDirectory'
 import { renderResearchAnswerHtml } from './researchAnswerHtml'
 
 echarts.use([CandlestickChart, ScatterChart, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
@@ -118,120 +119,30 @@ function AskPage() {
   </div>
 }
 
-type MemoryScope = 'internal' | 'internal_live'
-type MemoryCapability = { id: string, title: string, description: string, enabled: boolean }
-type MemoryAgent = { name: string, description: string, avatar: string, capabilities: MemoryCapability[] }
-type MemoryAnswer = { conclusion: string, citations: Citation[], tool_calls: ToolCall[] }
-type MemoryMessage = { role: 'user' | 'assistant', content: string, answer?: MemoryAnswer }
-type MemoryLocalSession = { id: string, title: string, updated_at: string }
-
-const memorySessionsStorageKey = 'research-os-memory-agent-sessions-v1'
-const memoryScopeOptions: { value: MemoryScope, label: string, hint: string }[] = [
-  { value: 'internal', label: '仅内部资料', hint: '仅检索已入库的机构研究材料' },
-  { value: 'internal_live', label: '内部 + 实时网页', hint: '以内部资料为主，并补充实时公开网页' },
-]
-
-function readMemorySessions(): MemoryLocalSession[] {
-  try {
-    const raw = JSON.parse(localStorage.getItem(memorySessionsStorageKey) ?? '[]')
-    return Array.isArray(raw) ? raw.filter((item): item is MemoryLocalSession => typeof item?.id === 'string' && typeof item?.title === 'string' && typeof item?.updated_at === 'string').slice(0, 20) : []
-  } catch { return [] }
-}
-
-function memorySessionTitle(question: string) {
-  const compact = question.replace(/\s+/g, ' ').trim()
-  return compact.length > 28 ? `${compact.slice(0, 28)}…` : compact || '新研究记忆'
-}
-
-function MemoryCitations({ citations }: { citations: Citation[] }) {
-  const internal = citations.filter(citation => (citation.source ?? 'internal') === 'internal')
-  const external = citations.filter(citation => citation.source === 'external')
-  if (!citations.length) return <span className="no-citation">本次回答未返回可展示的引用。</span>
-  return <div className="citation-groups">{internal.length > 0 && <div className="internal-citations"><label>内部知识库</label>{internal.map((citation, index) => <article className="internal-citation" key={`${citation.id}-${index}`}><span>▣</span><div><b>{citation.title}</b>{citation.chunk_id && <small>片段 {citation.chunk_id.slice(0, 8)}</small>}</div></article>)}</div>}{external.length > 0 && <div className="external-citations"><label>外部实时来源</label>{external.map((citation, index) => citation.url ? <a key={`${citation.id}-${index}`} href={citation.url} target="_blank" rel="noreferrer">{citation.title} ↗</a> : <span className="citation-chip" key={`${citation.id}-${index}`}>{citation.title}</span>)}</div>}</div>
-}
-
 function MemoryPage() {
-  const [agent, setAgent] = useState<MemoryAgent | null>(null)
-  const [sessions, setSessions] = useState<MemoryLocalSession[]>(readMemorySessions)
-  const [activeSession, setActiveSession] = useState<string | null>(() => readMemorySessions()[0]?.id ?? null)
-  const [messages, setMessages] = useState<MemoryMessage[]>([])
-  const [question, setQuestion] = useState('')
-  const [scope, setScope] = useState<MemoryScope>('internal')
-  const [loadingAgent, setLoadingAgent] = useState(true)
-  const [loadingMessages, setLoadingMessages] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
+  const [agents, setAgents] = useState<DirectoryAgent[]>([])
+  const [consoleURL, setConsoleURL] = useState('')
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  const persistSessions = useCallback((next: MemoryLocalSession[]) => {
-    const bounded = next.slice(0, 20)
-    setSessions(bounded)
-    try { localStorage.setItem(memorySessionsStorageKey, JSON.stringify(bounded)) } catch { /* Browser privacy mode may block local history. */ }
+  const loadAgents = useCallback(async () => {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/v1/research/memory-agents', { cache: 'no-store' })
+      const result = await response.json().catch(() => null) as { agents?: DirectoryAgent[], console_url?: string, error?: string } | null
+      if (!response.ok) throw new Error(result?.error || '无法读取 WeKnora 智能体列表')
+      setAgents(result?.agents ?? []); setConsoleURL(result?.console_url ?? ''); setError('')
+    } catch (requestError) {
+      setAgents([]); setError(requestError instanceof Error ? requestError.message : '无法读取 WeKnora 智能体列表')
+    } finally { setLoading(false) }
   }, [])
 
-  const loadAgent = useCallback(async () => {
-    setLoadingAgent(true)
-    try {
-      const response = await fetch('/api/v1/research/memory-agent', { cache: 'no-store' })
-      const result = await response.json().catch(() => null) as { agent?: MemoryAgent, error?: string } | null
-      if (!response.ok || !result?.agent) throw new Error(result?.error || '研究记忆智能体未连接')
-      setAgent(result.agent); setError('')
-    } catch (requestError) {
-      setAgent(null); setError(requestError instanceof Error ? requestError.message : '研究记忆智能体未连接')
-    } finally { setLoadingAgent(false) }
-  }, [])
-
-  const loadSession = useCallback(async (sessionID: string) => {
-    setLoadingMessages(true)
-    try {
-      const response = await fetch(`/api/v1/research/memory-agent/sessions/${encodeURIComponent(sessionID)}`, { cache: 'no-store' })
-      const result = await response.json().catch(() => null) as { messages?: MemoryMessage[], error?: string } | null
-      if (!response.ok) throw new Error(result?.error || '无法读取研究记忆会话')
-      setMessages(result?.messages ?? []); setError('')
-    } catch (requestError) {
-      setMessages([]); setError(requestError instanceof Error ? requestError.message : '无法读取研究记忆会话')
-    } finally { setLoadingMessages(false) }
-  }, [])
-
-  useEffect(() => { void loadAgent() }, [loadAgent])
-  useEffect(() => { if (activeSession) void loadSession(activeSession); else setMessages([]) }, [activeSession, loadSession])
-
-  const createNewSession = () => { if (submitting) return; setActiveSession(null); setMessages([]); setQuestion(''); setError('') }
-  const submit = async () => {
-    const normalizedQuestion = question.trim()
-    if (!normalizedQuestion || submitting || !agent) return
-    setSubmitting(true); setError('')
-    let sessionID = activeSession
-    try {
-      if (!sessionID) {
-        const created = await fetch('/api/v1/research/memory-agent/sessions', { method: 'POST' })
-        const creation = await created.json().catch(() => null) as { session_id?: string, error?: string } | null
-        if (!created.ok || !creation?.session_id) throw new Error(creation?.error || '无法新建研究记忆会话')
-        sessionID = creation.session_id
-        const createdAt = new Date().toISOString()
-        persistSessions([{ id: sessionID, title: memorySessionTitle(normalizedQuestion), updated_at: createdAt }, ...sessions.filter(item => item.id !== sessionID)])
-      }
-      const response = await fetch(`/api/v1/research/memory-agent/sessions/${encodeURIComponent(sessionID)}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: normalizedQuestion, scope }) })
-      const result = await response.json().catch(() => null) as { error?: string } | null
-      if (!response.ok) throw new Error(result?.error || '研究记忆智能体未返回回答')
-      const updatedAt = new Date().toISOString()
-      persistSessions([{ id: sessionID, title: memorySessionTitle(normalizedQuestion), updated_at: updatedAt }, ...sessions.filter(item => item.id !== sessionID)])
-      setQuestion('')
-      setActiveSession(sessionID)
-      await loadSession(sessionID)
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : '研究记忆智能体暂时无法响应，请稍后重试')
-    } finally { setSubmitting(false) }
-  }
-
-  const activeLabel = sessions.find(item => item.id === activeSession)?.title ?? '新研究记忆'
-  return <div className="memory-agent-layout">
-    <Card className="memory-agent-hero">
-      {loadingAgent ? <div className="memory-agent-loading"><span className="answer-loading-indicator" />正在连接 HYGR 研究记忆…</div> : agent ? <><div className="memory-agent-title"><div className="memory-agent-avatar">{agent.avatar}</div><div><div className="eyebrow">WEKNORA · RESEARCH MEMORY AGENT</div><h2>{agent.name}</h2><p>{agent.description}</p></div><Pill tone="green">● 已连接</Pill></div><div className="memory-capabilities">{agent.capabilities.map(capability => <article key={capability.id} className={capability.enabled ? 'enabled' : 'disabled'}><div><b>{capability.title}</b><p>{capability.description}</p></div><span>{capability.enabled ? '已启用' : '未启用'}</span></article>)}</div></> : <div className="memory-agent-unavailable"><b>研究记忆智能体未连接</b><p>{error || '请联系管理员完成 WeKnora Agent 配置。'}</p><button className="primary" onClick={() => void loadAgent()}>重新连接</button></div>}
-    </Card>
-    {agent && <div className="memory-workbench">
-      <Card className="memory-session-list"><div className="memory-session-head"><div><div className="eyebrow">PRIVATE BROWSER HISTORY</div><b>研究会话</b></div><button className="primary" disabled={submitting} onClick={createNewSession}>+ 新建会话</button></div><p>仅保存在当前浏览器，不展示团队其他成员的会话。</p><div className="memory-session-items">{sessions.length ? sessions.map(session => <button className={session.id === activeSession ? 'active' : ''} key={session.id} disabled={submitting} onClick={() => setActiveSession(session.id)}><b>{session.title}</b><small>{new Date(session.updated_at).toLocaleString()}</small></button>) : <div className="memory-session-empty">从一个问题开始建立研究记忆。</div>}</div></Card>
-      <Card className="memory-chat"><div className="memory-chat-head"><div><Pill tone="violet">{activeSession ? '记忆会话' : '新会话'}</Pill><h2>{activeLabel}</h2></div><span>回答保留真实引用与检索痕迹</span></div>{loadingMessages ? <div className="memory-agent-loading"><span className="answer-loading-indicator" />正在回读研究记忆…</div> : messages.length ? <div className="memory-message-list">{messages.map((message, index) => message.role === 'user' ? <article className="memory-message user" key={`user-${index}`}><label>研究员</label><p>{message.content}</p></article> : <article className="memory-message assistant" key={`assistant-${index}`}><label>{agent.name}</label><div className="answer-html" dangerouslySetInnerHTML={{ __html: renderResearchAnswerHtml(message.content) }} />{message.answer && <><section className="citations"><span>检索引用</span><MemoryCitations citations={message.answer.citations ?? []} /></section><details className="tool-history"><summary>工具调用历史 <span>{message.answer.tool_calls?.length ?? 0} 步</span></summary>{message.answer.tool_calls?.length ? <ol>{message.answer.tool_calls.map((call, callIndex) => <li key={`${call.name}-${call.started_at}-${callIndex}`}><span className={`tool-call-status ${call.status}`} /><div><b>{call.name}</b><em>{call.source === 'agent' ? '智能体工具' : '服务步骤'}</em><p>{call.detail}</p></div><time>{new Date(call.started_at).toLocaleTimeString()} · {call.duration_ms} ms</time></li>)}</ol> : <p className="tool-history-empty">本次回答未返回调用记录。</p>}</details></>}</article>)}</div> : <div className="memory-chat-empty"><span>◈</span><h3>从机构研究记忆开始</h3><p>提问后可继续追溯观点、证据与时间锚点。选择“内部 + 实时网页”时，回答会区分实时补充来源。</p></div>}{error && <div className="memory-chat-error" role="alert">{error}</div>}<div className="memory-composer"><div className="scope-row">{memoryScopeOptions.map(option => <button title={option.hint} className={`scope ${scope === option.value ? 'active' : ''}`} disabled={submitting} key={option.value} onClick={() => setScope(option.value)}>{option.label}</button>)}</div><div className="memory-input"><textarea aria-label="研究记忆问题" disabled={submitting} placeholder="问一段研究记忆，例如：ETH 中期命题的证据与失效条件是什么？" value={question} onChange={event => { setQuestion(event.target.value); setError('') }} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit() } }} /><button disabled={submitting || !question.trim()} onClick={() => void submit()}>{submitting ? '检索中…' : '发送 →'}</button></div><div className="quick-row">{['追溯观点版本', '定位关键证据', '检查失效条件', '梳理下一验证项'].map(item => <button disabled={submitting} key={item} onClick={() => setQuestion(`${item}：请基于机构研究记忆给出可追溯的结论。`)}>{item}</button>)}</div></div></Card>
-    </div>}
+  useEffect(() => { void loadAgents() }, [loadAgents])
+  const groups = groupDirectoryAgents(agents)
+  const renderGroup = (title: string, label: string, items: DirectoryAgent[]) => items.length > 0 && <section className="memory-directory-group"><div className="memory-directory-group-title"><span>{label}</span><h2>{title}</h2><em>{items.length}</em></div><div className="memory-directory-grid">{items.map(agent => <a className="memory-directory-card" href={consoleURL} target="_blank" rel="noopener noreferrer" key={agent.id}><span className="memory-directory-avatar">{agent.avatar || '◈'}</span><div><b>{agent.name}</b><p>{agent.description || '在 WeKnora 中查看并继续使用该智能体。'}</p></div><small>在 WeKnora 中继续 ↗</small></a>)}</div></section>
+  return <div className="memory-agent-directory">
+    <Card className="memory-directory-hero"><div><div className="eyebrow">WEKNORA · AGENT DIRECTORY</div><h2>研究智能体</h2><p>从 WeKnora 平台选择合适的智能体，跳转后继续配置、对话与使用。</p></div>{consoleURL && <a className="primary memory-directory-open" href={consoleURL} target="_blank" rel="noopener noreferrer">打开 WeKnora 智能体 ↗</a>}</Card>
+    {loading ? <Card className="memory-directory-loading"><span className="answer-loading-indicator" />正在读取 WeKnora 智能体列表…</Card> : error ? <Card className="memory-directory-error"><b>智能体列表暂不可用</b><p>{error}</p><button className="primary" onClick={() => void loadAgents()}>重新加载</button></Card> : agents.length === 0 ? <Card className="memory-directory-empty"><b>暂无可显示的智能体</b><p>请前往 WeKnora 创建或检查当前租户权限。</p>{consoleURL && <a className="primary" href={consoleURL} target="_blank" rel="noopener noreferrer">打开 WeKnora 智能体 ↗</a>}</Card> : <>{renderGroup('内置', '⌘', groups.builtin)}{renderGroup('我创建的', '♙', groups.created)}</>}
   </div>
 }
 

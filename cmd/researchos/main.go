@@ -94,6 +94,7 @@ func main() {
 	})
 	mux.HandleFunc("GET /api/v1/research/uploads", weKnora.serveResearchUploads)
 	mux.HandleFunc("POST /api/v1/research/uploads", weKnora.serveResearchUpload)
+	mux.HandleFunc("GET /api/v1/research/memory-agents", memoryAgent.serveDirectory)
 	mux.HandleFunc("GET /api/v1/research/memory-agent", memoryAgent.serveInfo)
 	mux.HandleFunc("POST /api/v1/research/memory-agent/sessions", memoryAgent.serveCreateSession)
 	mux.HandleFunc("GET /api/v1/research/memory-agent/sessions/{session}", memoryAgent.serveMessages)

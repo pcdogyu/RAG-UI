@@ -102,3 +102,48 @@ func TestMemoryScopeAndHandlerValidation(t *testing.T) {
 		t.Fatalf("bad token response = %d %s", response.Code, response.Body.String())
 	}
 }
+
+func TestMemoryAgentDirectoryReturnsSafePlatformAgents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/auth/login":
+			_, _ = w.Write([]byte(`{"success":true,"token":"test-token","active_tenant":{"id":"tenant-a"}}`))
+		case "/api/v1/agents":
+			_, _ = w.Write([]byte(`{"data":[{"id":"builtin-quick-answer","name":"快速问答","description":"RAG 问答","avatar":"◈","is_builtin":true,"tenant_id":"system","config":{"secret":"must-not-leak"}},{"id":"hygr-memory","name":"HYGR 研究记忆","description":"研究追溯","avatar":"◆","is_builtin":false,"created_by":"admin"},{"id":"","name":"损坏记录","is_builtin":false}]}`))
+		default:
+			t.Fatalf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	service := newMemoryAgentService(NewWeKnoraClient(WeKnoraConfig{BaseURL: server.URL, ConsoleURL: "https://console.example/", Email: "researcher@example.com", Password: "test-secret"}))
+	response := httptest.NewRecorder()
+	service.serveDirectory(response, httptest.NewRequest(http.MethodGet, "/api/v1/research/memory-agents", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("directory response = %d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "must-not-leak") || strings.Contains(response.Body.String(), "tenant_id") || strings.Contains(response.Body.String(), "created_by") {
+		t.Fatalf("directory leaked upstream fields: %s", response.Body.String())
+	}
+	var body struct {
+		Agents     []memoryAgentDirectoryItem `json:"agents"`
+		ConsoleURL string                     `json:"console_url"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode directory response: %v", err)
+	}
+	if len(body.Agents) != 2 || !body.Agents[0].IsBuiltin || body.Agents[1].IsBuiltin {
+		t.Fatalf("directory agents = %#v", body.Agents)
+	}
+	if body.ConsoleURL != "https://console.example/platform/agents" {
+		t.Fatalf("console URL = %q", body.ConsoleURL)
+	}
+
+	unconfigured := newMemoryAgentService(NewWeKnoraClient(WeKnoraConfig{}))
+	response = httptest.NewRecorder()
+	unconfigured.serveDirectory(response, httptest.NewRequest(http.MethodGet, "/api/v1/research/memory-agents", nil))
+	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "Password") {
+		t.Fatalf("unconfigured directory = %d %s", response.Code, response.Body.String())
+	}
+}

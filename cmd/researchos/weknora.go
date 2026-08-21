@@ -102,6 +102,20 @@ type agentDetail struct {
 	} `json:"data"`
 }
 
+// weKnoraAgentListItem deliberately contains only the fields needed to render
+// the public Research OS directory. It does not include an agent's config.
+type weKnoraAgentListItem struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Avatar      string `json:"avatar"`
+	IsBuiltin   bool   `json:"is_builtin"`
+}
+
+type agentListResponse struct {
+	Data []weKnoraAgentListItem `json:"data"`
+}
+
 type sessionResponse struct {
 	Data struct {
 		ID string `json:"id"`
@@ -316,6 +330,14 @@ func (c *WeKnoraClient) login(ctx context.Context) (weKnoraLogin, error) {
 func (c *WeKnoraClient) agentConfig(ctx context.Context, login weKnoraLogin) (agentConfig, error) {
 	detail, err := c.agentDetail(ctx, login, c.config.AgentID)
 	return detail.Data.Config, err
+}
+
+func (c *WeKnoraClient) listAgents(ctx context.Context, login weKnoraLogin) ([]weKnoraAgentListItem, error) {
+	var response agentListResponse
+	if err := c.json(ctx, http.MethodGet, "/api/v1/agents", &login, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Data, nil
 }
 
 func (c *WeKnoraClient) agentDetail(ctx context.Context, login weKnoraLogin, agentID string) (agentDetail, error) {

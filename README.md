@@ -71,6 +71,7 @@ $env:RISK_TELEGRAM_CHAT_ID = 'your-chat-id'
 ## WeKnora 接入点
 
 - `GET /api/v1/research/reports`：研究记忆页的演示数据接口，后续可对接机构语义库。
+- `GET /api/v1/research/memory-agents`：只读返回 WeKnora 平台智能体的安全目录字段；页面按内置与自建分组展示，点击后在 WeKnora 中继续操作。
 - `POST /api/v1/research/ask`：登录 WeKnora、读取 HYGR投研工作台配置、创建会话、消费 SSE 响应，再返回完整回答与引用；页面的“仅内部 / 内部 + 实时 / 仅原始来源”会作为明确的检索指令传入智能体。
 - `GET /api/v1/research/uploads`、`POST /api/v1/research/uploads`：固定使用已配置的 WeKnora 知识库列出最近 10 个文件、上传单个 PDF/Word/PPT 文件；凭据和知识库 ID 不会返回浏览器。
 - `GET /api/v1/watchlist/brief`：只使用 WeKnora 已授权的外部实时检索生成 Crypto／美股 Bull、Base、Bear 情景和最新 10 条重大新闻；默认缓存 15 分钟，使用 `?refresh=1` 强制刷新，不查询内部知识库。
