@@ -151,7 +151,7 @@ func TestRangeAndVenueValidation(t *testing.T) {
 }
 
 func TestCandleIntervalValidationAndAggregation(t *testing.T) {
-	for _, value := range []string{"5m", "15m", "1h"} {
+	for _, value := range []string{"1m", "2m", "3m", "5m", "15m", "1h"} {
 		interval, _, ok := parseCandleInterval(value)
 		if !ok || interval != value {
 			t.Fatalf("interval %q was not accepted", value)
@@ -162,10 +162,21 @@ func TestCandleIntervalValidationAndAggregation(t *testing.T) {
 	}
 	base := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
 	raw := []candle{
-		{Symbol: "ETH-USDT", Interval: "5m", OpenTime: base, Open: 100, High: 103, Low: 99, Close: 102, Volume: 2},
-		{Symbol: "ETH-USDT", Interval: "5m", OpenTime: base.Add(5 * time.Minute), Open: 102, High: 105, Low: 101, Close: 104, Volume: 3},
-		{Symbol: "ETH-USDT", Interval: "5m", OpenTime: base.Add(10 * time.Minute), Open: 104, High: 106, Low: 103, Close: 105, Volume: 5},
-		{Symbol: "ETH-USDT", Interval: "5m", OpenTime: base.Add(15 * time.Minute), Open: 105, High: 108, Low: 104, Close: 107, Volume: 7},
+		{Symbol: "ETH-USDT", Interval: "1m", OpenTime: base, Open: 100, High: 103, Low: 99, Close: 102, Volume: 2},
+		{Symbol: "ETH-USDT", Interval: "1m", OpenTime: base.Add(5 * time.Minute), Open: 102, High: 105, Low: 101, Close: 104, Volume: 3},
+		{Symbol: "ETH-USDT", Interval: "1m", OpenTime: base.Add(10 * time.Minute), Open: 104, High: 106, Low: 103, Close: 105, Volume: 5},
+		{Symbol: "ETH-USDT", Interval: "1m", OpenTime: base.Add(15 * time.Minute), Open: 105, High: 108, Low: 104, Close: 107, Volume: 7},
+	}
+	if oneMinute := aggregateCandles(raw, "1m"); len(oneMinute) != len(raw) || oneMinute[0].Interval != "1m" {
+		t.Fatalf("unexpected 1m candles: %+v", oneMinute)
+	}
+	twoMinute := aggregateCandles([]candle{raw[0], {Symbol: "ETH-USDT", Interval: "1m", OpenTime: base.Add(time.Minute), Open: 102, High: 104, Low: 100, Close: 103, Volume: 3}, {Symbol: "ETH-USDT", Interval: "1m", OpenTime: base.Add(2 * time.Minute), Open: 103, High: 106, Low: 102, Close: 105, Volume: 5}}, "2m")
+	if len(twoMinute) != 2 || twoMinute[0].Interval != "2m" || twoMinute[0].Open != 100 || twoMinute[0].Close != 103 || twoMinute[0].Volume != 5 {
+		t.Fatalf("unexpected 2m candles: %+v", twoMinute)
+	}
+	threeMinute := aggregateCandles([]candle{raw[0], {Symbol: "ETH-USDT", Interval: "1m", OpenTime: base.Add(time.Minute), Open: 102, High: 104, Low: 100, Close: 103, Volume: 3}, {Symbol: "ETH-USDT", Interval: "1m", OpenTime: base.Add(2 * time.Minute), Open: 103, High: 106, Low: 102, Close: 105, Volume: 5}}, "3m")
+	if len(threeMinute) != 1 || threeMinute[0].Interval != "3m" || threeMinute[0].Open != 100 || threeMinute[0].Close != 105 || threeMinute[0].Volume != 10 {
+		t.Fatalf("unexpected 3m candles: %+v", threeMinute)
 	}
 	fifteenMinute := aggregateCandles(raw, "15m")
 	if len(fifteenMinute) != 2 {

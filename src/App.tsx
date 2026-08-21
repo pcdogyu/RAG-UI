@@ -224,9 +224,9 @@ type LiquidationExchangeStatus = { connected: boolean, lastEvent?: string, lastD
 type LiquidationChart = { symbol: string, interval: CandleInterval, collectionStartedAt?: string, candles: LiquidationCandle[], events: LiquidationEvent[], status: { exchanges: Record<string, LiquidationExchangeStatus>, fallback?: { enabled: boolean, lastSuccess?: string, error?: string } } }
 type ZoomWindow = { start: number, end: number }
 type LiquidationFilterKind = 'notional' | 'quantity'
-type CandleInterval = '5m' | '15m' | '1h'
+type CandleInterval = '1m' | '2m' | '3m' | '5m' | '15m' | '1h'
 const chartRanges = ['1h', '4h', '8h', '12h', '24h', '7d'] as const
-const candleIntervals: CandleInterval[] = ['5m', '15m', '1h']
+const candleIntervals: CandleInterval[] = ['1m', '2m', '3m', '5m', '15m', '1h']
 const formatMoney = (value: number) => value >= 1_000_000 ? `$${(value / 1_000_000).toFixed(2)}M` : value >= 1_000 ? `$${(value / 1_000).toFixed(1)}K` : `$${value.toFixed(0)}`
 const formatQuantity = (value: number) => value >= 1_000 ? `${(value / 1_000).toFixed(1)}K` : value >= 100 ? value.toFixed(0) : value >= 10 ? value.toFixed(1) : value >= 1 ? value.toFixed(2) : value.toPrecision(2)
 
@@ -250,41 +250,15 @@ function LiquidationBubblePage({ theme }: { theme: Theme }) {
   useEffect(() => {
     const chart = instance.current; if (!chart) return
     const candles = data?.candles ?? []; const events = data?.events ?? []
-    const sortedCandles = [...candles].sort((left, right) => Date.parse(left.openTime) - Date.parse(right.openTime))
-    const priceSpan = sortedCandles.length ? Math.max(...sortedCandles.map(item => item.high)) - Math.min(...sortedCandles.map(item => item.low)) : 0
-    const bubblePadding = Math.max(priceSpan * .012, .01)
-    const candleAt = (occurredAt: string) => {
-      const timestamp = Date.parse(occurredAt); let selected = sortedCandles[0]
-      for (const candle of sortedCandles) { if (Date.parse(candle.openTime) > timestamp) break; selected = candle }
-      return selected
-    }
     const minNotional = events.length ? Math.min(...events.map(item => item.notional)) : 0; const maxNotional = events.length ? Math.max(...events.map(item => item.notional)) : 0
     const bubbleSize = (notional: number) => maxNotional <= minNotional ? 24 : 12 + 46 * Math.sqrt(Math.max(0, (notional - minNotional) / (maxNotional - minNotional)))
     const zoom = zoomWindow.current; const zoomState = zoom ? { start: zoom.start, end: zoom.end } : {}
     const bubbles = (side: 'long' | 'short', color: string, name: string) => {
-      const groups = new Map<string, Array<{ item: LiquidationEvent, candle?: LiquidationCandle }>>()
-      for (const item of events.filter(event => event.side === side)) {
-        const candle = candleAt(item.occurredAt)
-        const key = candle?.openTime ?? item.occurredAt
-        const group = groups.get(key) ?? []
-        group.push({ item, candle })
-        groups.set(key, group)
-      }
-      const data = Array.from(groups.values()).flatMap(group => {
-        group.sort((left, right) => Date.parse(left.item.occurredAt) - Date.parse(right.item.occurredAt) || right.item.notional - left.item.notional)
-        let distance = 0
-        return group.map(({ item, candle }) => {
-          const radiusInPrice = priceSpan * Math.max(20, bubbleSize(item.notional)) / 720
-          distance += radiusInPrice + bubblePadding
-          const anchor = candle ? (side === 'long' ? candle.low : candle.high) : item.price
-          const plotPrice = side === 'long' ? anchor - distance : anchor + distance
-          distance += radiusInPrice
-          return [item.occurredAt, plotPrice, item.notional, item.exchange, item.quantity, item.price]
-        })
-      })
+      // Keep every bubble center at its source liquidation price; overlapping events remain distinct tooltip items.
+      const data = events.filter(item => item.side === side).map(item => [item.occurredAt, item.price, item.notional, item.exchange, item.quantity])
       return {
       name, type: 'scatter' as const, data,
-      symbolOffset: [0, side === 'long' ? 12 : -12], symbolSize: (value: unknown[]) => bubbleSize(Number(value[2])), label: { show: showBubbleQuantity, position: 'inside', color: chartTheme.bubbleLabel, fontSize: 9, fontWeight: 700, formatter: (params: { value?: unknown[] }) => formatQuantity(Number(params.value?.[4])) }, itemStyle: { color, opacity: .72 }, z: 6
+      symbolSize: (value: unknown[]) => bubbleSize(Number(value[2])), label: { show: showBubbleQuantity, position: 'inside', color: chartTheme.bubbleLabel, fontSize: 9, fontWeight: 700, formatter: (params: { value?: unknown[] }) => formatQuantity(Number(params.value?.[4])) }, itemStyle: { color, opacity: .72 }, z: 6
       }
     }
     const candleLabel = `OKX ${data?.interval ?? candleInterval} K线`
@@ -292,14 +266,14 @@ function LiquidationBubblePage({ theme }: { theme: Theme }) {
       ? { muted: '#52657c', grid: '#d7e0ec', tooltip: '#ffffff', tooltipBorder: '#b6c4d6', text: '#18243a', sliderBorder: '#b8c6d8', sliderFill: '#725cbb40', bubbleLabel: '#1f3149' }
       : { muted: '#9eacc1', grid: '#243044', tooltip: '#101925', tooltipBorder: '#3a4b65', text: '#e9eef7', sliderBorder: '#314058', sliderFill: '#725cbb55', bubbleLabel: '#eef5ff' }
     chart.setOption({
-      animation: false, backgroundColor: 'transparent', grid: { left: 58, right: 28, top: 44, bottom: 68 },
+      animation: false, backgroundColor: 'transparent', grid: { left: 58, right: 88, top: 44, bottom: 68 },
       legend: { top: 8, textStyle: { color: chartTheme.muted, fontSize: 11 }, data: [candleLabel, '多头爆仓', '空头爆仓'] },
       tooltip: { trigger: 'axis', axisPointer: { type: 'cross' }, backgroundColor: chartTheme.tooltip, borderColor: chartTheme.tooltipBorder, textStyle: { color: chartTheme.text }, formatter: (raw: unknown) => {
         const items = raw as Array<{ seriesName: string, value: unknown[] }>
-        return items.filter(item => item.seriesName !== candleLabel).map(item => `<b>${item.seriesName}</b><br/>时间：${new Date(String(item.value[0])).toLocaleString()}<br/>价格：${Number(item.value[5] ?? item.value[1]).toLocaleString()}<br/>名义价值：${formatMoney(Number(item.value[2]))}<br/>交易所：${item.value[3]}<br/>数量：${Number(item.value[4]).toLocaleString()}`).join('<hr/>')
+        return items.filter(item => item.seriesName !== candleLabel).map(item => `<b>${item.seriesName}</b><br/>时间：${new Date(String(item.value[0])).toLocaleString()}<br/>价格：${Number(item.value[1]).toLocaleString()}<br/>名义价值：${formatMoney(Number(item.value[2]))}<br/>交易所：${item.value[3]}<br/>数量：${Number(item.value[4]).toLocaleString()}`).join('<hr/>')
       } },
-      xAxis: { type: 'time', axisLine: { lineStyle: { color: chartTheme.muted } }, axisLabel: { color: chartTheme.muted }, splitLine: { show: false } },
-      yAxis: { scale: true, axisLine: { lineStyle: { color: chartTheme.muted } }, axisLabel: { color: chartTheme.muted }, splitLine: { lineStyle: { color: chartTheme.grid } } },
+      xAxis: { type: 'time', axisLine: { lineStyle: { color: chartTheme.muted } }, axisLabel: { color: chartTheme.muted }, splitLine: { show: true, lineStyle: { color: chartTheme.grid, type: 'dashed' } } },
+      yAxis: { type: 'value', position: 'right', scale: true, axisLine: { show: true, lineStyle: { color: chartTheme.muted } }, axisLabel: { color: chartTheme.muted, formatter: (value: number) => Number(value).toLocaleString(undefined, { maximumFractionDigits: 6 }) }, splitLine: { show: true, lineStyle: { color: chartTheme.grid } } },
       dataZoom: [{ type: 'inside', xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: false, preventDefaultMouseMove: true, ...zoomState }, { type: 'slider', xAxisIndex: 0, height: 18, bottom: 18, borderColor: chartTheme.sliderBorder, fillerColor: chartTheme.sliderFill, textStyle: { color: chartTheme.muted }, ...zoomState }],
       series: [{ name: candleLabel, type: 'candlestick', data: candles.map(item => [item.openTime, item.open, item.close, item.low, item.high]), itemStyle: { color: '#57c995', color0: '#ec6e83', borderColor: '#57c995', borderColor0: '#ec6e83' } }, bubbles('long', '#f06e84', '多头爆仓'), bubbles('short', '#55d7a1', '空头爆仓')],
     }, true)

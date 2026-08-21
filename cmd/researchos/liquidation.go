@@ -22,10 +22,13 @@ import (
 )
 
 const (
-	liquidationRetention = 7 * 24 * time.Hour
-	fallbackPollInterval = 5 * time.Second
-	fallbackBackfillAge  = 24 * time.Hour
-	defaultFallbackURL   = "http://10.15.0.6"
+	liquidationRetention   = 7 * 24 * time.Hour
+	fallbackPollInterval   = 5 * time.Second
+	fallbackBackfillAge    = 24 * time.Hour
+	defaultFallbackURL     = "http://10.15.0.6"
+	baseCandleInterval     = "1m"
+	baseCandleDuration     = time.Minute
+	maxCandleBackfillPages = 36
 )
 
 type liquidationEvent struct {
@@ -82,7 +85,10 @@ type candle struct {
 }
 
 func parseCandleInterval(value string) (string, time.Duration, bool) {
-	intervals := map[string]time.Duration{"5m": 5 * time.Minute, "15m": 15 * time.Minute, "1h": time.Hour}
+	intervals := map[string]time.Duration{
+		"1m": time.Minute, "2m": 2 * time.Minute, "3m": 3 * time.Minute,
+		"5m": 5 * time.Minute, "15m": 15 * time.Minute, "1h": time.Hour,
+	}
 	if value == "" {
 		value = "5m"
 	}
@@ -92,7 +98,7 @@ func parseCandleInterval(value string) (string, time.Duration, bool) {
 
 func aggregateCandles(items []candle, interval string) []candle {
 	_, duration, ok := parseCandleInterval(interval)
-	if !ok || interval == "5m" || len(items) == 0 {
+	if !ok || interval == baseCandleInterval || len(items) == 0 {
 		return items
 	}
 	aggregated := make([]candle, 0, len(items))
@@ -227,10 +233,9 @@ func (s *liquidationStore) saveCandle(ctx context.Context, item candle) error {
 }
 
 func (s *liquidationStore) chart(ctx context.Context, symbol string, since time.Time, interval string, exchanges map[string]bool, filter liquidationFilter) ([]candle, []liquidationEvent, time.Time, error) {
-	_, intervalDuration, _ := parseCandleInterval(interval)
-	candleSince := since.UTC().Truncate(intervalDuration)
+	candleSince := since.UTC().Truncate(baseCandleDuration)
 	candleRows, err := s.db.QueryContext(ctx, `SELECT symbol, interval, open_time, open, high, low, close, volume
-		FROM liquidation_candles WHERE symbol=$1 AND interval='5m' AND open_time >= $2 ORDER BY open_time`, symbol, candleSince)
+		FROM liquidation_candles WHERE symbol=$1 AND interval=$2 AND open_time >= $3 ORDER BY open_time`, symbol, baseCandleInterval, candleSince)
 	if err != nil {
 		return nil, nil, time.Time{}, err
 	}
@@ -288,7 +293,7 @@ func (s *liquidationStore) chart(ctx context.Context, symbol string, since time.
 
 func (s *liquidationStore) candleCount(ctx context.Context, symbol string, since time.Time) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM liquidation_candles WHERE symbol=$1 AND interval='5m' AND open_time >= $2`, symbol, since).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM liquidation_candles WHERE symbol=$1 AND interval=$2 AND open_time >= $3`, symbol, baseCandleInterval, since).Scan(&count)
 	return count, err
 }
 
@@ -680,8 +685,8 @@ func (s *liquidationService) backfillCandles(ctx context.Context, canonicalSymbo
 		return fmt.Errorf("unknown symbol %s", canonicalSymbol)
 	}
 	after := ""
-	for page := 0; page < 12; page++ {
-		endpoint := "https://www.okx.com/api/v5/market/history-candles?instId=" + url.QueryEscape(instrument) + "&bar=5m&limit=300"
+	for page := 0; page < maxCandleBackfillPages; page++ {
+		endpoint := "https://www.okx.com/api/v5/market/history-candles?instId=" + url.QueryEscape(instrument) + "&bar=" + baseCandleInterval + "&limit=300"
 		if after != "" {
 			endpoint += "&after=" + url.QueryEscape(after)
 		}
@@ -707,7 +712,7 @@ func (s *liquidationService) backfillCandles(ctx context.Context, canonicalSymbo
 			if openTime.Before(oldest) {
 				oldest = openTime
 			}
-			if err := s.store.saveCandle(ctx, candle{Symbol: canonicalSymbol, Interval: "5m", OpenTime: openTime, Open: number(row[1]), High: number(row[2]), Low: number(row[3]), Close: number(row[4]), Volume: number(row[5])}); err != nil {
+			if err := s.store.saveCandle(ctx, candle{Symbol: canonicalSymbol, Interval: baseCandleInterval, OpenTime: openTime, Open: number(row[1]), High: number(row[2]), Low: number(row[3]), Close: number(row[4]), Volume: number(row[5])}); err != nil {
 				return err
 			}
 		}
@@ -836,7 +841,7 @@ func (s *liquidationService) runOKX(ctx context.Context) error {
 	args := []map[string]string{{"channel": "liquidation-orders", "instType": "SWAP"}}
 	for _, symbol := range s.symbolsSnapshot() {
 		if symbol.OKXInstrumentID != "" {
-			args = append(args, map[string]string{"channel": "candle5m", "instId": symbol.OKXInstrumentID})
+			args = append(args, map[string]string{"channel": "candle1m", "instId": symbol.OKXInstrumentID})
 		}
 	}
 	if err := wsjson.Write(ctx, conn, map[string]any{"op": "subscribe", "args": args}); err != nil {
@@ -855,7 +860,7 @@ func (s *liquidationService) runOKX(ctx context.Context) error {
 			return err
 		}
 		s.markDirectRawMessage("okx")
-		if message.Arg.Channel == "candle5m" {
+		if message.Arg.Channel == "candle1m" {
 			for _, raw := range message.Data {
 				if item, ok := s.normalizeOKXCandle(message.Arg.InstID, raw); ok && s.store != nil {
 					if err := s.store.saveCandle(ctx, item); err != nil {
@@ -906,7 +911,7 @@ func (s *liquidationService) normalizeOKXCandle(instID string, raw json.RawMessa
 	if err != nil {
 		return candle{}, false
 	}
-	return candle{Symbol: symbol.Symbol, Interval: "5m", OpenTime: time.UnixMilli(ts).UTC(), Open: number(values[1]), High: number(values[2]), Low: number(values[3]), Close: number(values[4]), Volume: number(values[5])}, true
+	return candle{Symbol: symbol.Symbol, Interval: baseCandleInterval, OpenTime: time.UnixMilli(ts).UTC(), Open: number(values[1]), High: number(values[2]), Low: number(values[3]), Close: number(values[4]), Volume: number(values[5])}, true
 }
 
 func (s *liquidationService) normalizeOKXLiquidations(raw json.RawMessage) []liquidationEvent {
@@ -1079,9 +1084,9 @@ func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "range must be 1h, 4h, 8h, 12h, 24h, or 7d"})
 		return
 	}
-	interval, intervalDuration, ok := parseCandleInterval(r.URL.Query().Get("interval"))
+	interval, _, ok := parseCandleInterval(r.URL.Query().Get("interval"))
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "interval must be 5m, 15m, or 1h"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "interval must be 1m, 2m, 3m, 5m, 15m, or 1h"})
 		return
 	}
 	exchanges, ok := exchangesFromQuery(r.URL.Query().Get("exchanges"))
@@ -1098,8 +1103,8 @@ func (s *liquidationService) serveChart(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "liquidation database is not configured"})
 		return
 	}
-	candleSince := since.UTC().Truncate(intervalDuration)
-	minimumCandles := int(time.Since(candleSince) / (5 * time.Minute) * 3 / 4)
+	candleSince := since.UTC().Truncate(baseCandleDuration)
+	minimumCandles := int(time.Since(candleSince) / baseCandleDuration * 3 / 4)
 	if minimumCandles < 1 {
 		minimumCandles = 1
 	}
