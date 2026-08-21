@@ -339,6 +339,7 @@ func (s *liquidationService) start(ctx context.Context) {
 	go s.universeLoop(ctx)
 	go s.binanceLoop(ctx)
 	go s.okxLoop(ctx)
+	go s.okxCandleLoop(ctx)
 	if s.store != nil {
 		go s.fallbackLoop(ctx)
 		retention := retentionDuration()
@@ -819,7 +820,7 @@ func (s *liquidationService) okxLoop(ctx context.Context) {
 				continue
 			}
 		}
-		err := s.runOKX(ctx)
+		err := s.runOKXLiquidations(ctx)
 		s.setDirectStatus("okx", false, err)
 		if err != nil {
 			log.Printf("okx liquidation stream: %v", err)
@@ -832,13 +833,75 @@ func (s *liquidationService) okxLoop(ctx context.Context) {
 	}
 }
 
-func (s *liquidationService) runOKX(ctx context.Context) error {
+func (s *liquidationService) okxCandleLoop(ctx context.Context) {
+	for ctx.Err() == nil {
+		if len(s.symbolsSnapshot()) == 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+		if err := s.runOKXCandles(ctx); err != nil {
+			log.Printf("okx candle stream: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+func (s *liquidationService) runOKXLiquidations(ctx context.Context) error {
+	conn, _, err := websocket.Dial(ctx, "wss://ws.okx.com:8443/ws/v5/public", nil)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	if err := wsjson.Write(ctx, conn, map[string]any{"op": "subscribe", "args": []map[string]string{{"channel": "liquidation-orders", "instType": "SWAP"}}}); err != nil {
+		return err
+	}
+	for {
+		var message struct {
+			Event string `json:"event"`
+			Code  string `json:"code"`
+			Msg   string `json:"msg"`
+			Arg   struct {
+				Channel string `json:"channel"`
+			} `json:"arg"`
+			Data []json.RawMessage `json:"data"`
+		}
+		if err := wsjson.Read(ctx, conn, &message); err != nil {
+			return err
+		}
+		if message.Event == "error" {
+			return fmt.Errorf("OKX liquidation subscription %s: %s", message.Code, message.Msg)
+		}
+		if message.Event == "subscribe" && message.Arg.Channel == "liquidation-orders" {
+			s.setDirectStatus("okx", true, nil)
+			continue
+		}
+		if message.Arg.Channel != "liquidation-orders" {
+			continue
+		}
+		s.markDirectRawMessage("okx")
+		for _, raw := range message.Data {
+			for _, event := range s.normalizeOKXLiquidations(raw) {
+				s.handleEvent(ctx, event, "direct")
+			}
+		}
+	}
+}
+
+func (s *liquidationService) runOKXCandles(ctx context.Context) error {
 	conn, _, err := websocket.Dial(ctx, "wss://ws.okx.com:8443/ws/v5/business", nil)
 	if err != nil {
 		return err
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	args := []map[string]string{{"channel": "liquidation-orders", "instType": "SWAP"}}
+	args := make([]map[string]string, 0, len(s.symbolsSnapshot()))
 	for _, symbol := range s.symbolsSnapshot() {
 		if symbol.OKXInstrumentID != "" {
 			args = append(args, map[string]string{"channel": "candle1m", "instId": symbol.OKXInstrumentID})
@@ -847,7 +910,6 @@ func (s *liquidationService) runOKX(ctx context.Context) error {
 	if err := wsjson.Write(ctx, conn, map[string]any{"op": "subscribe", "args": args}); err != nil {
 		return err
 	}
-	s.setDirectStatus("okx", true, nil)
 	for {
 		var message struct {
 			Arg struct {
@@ -859,21 +921,12 @@ func (s *liquidationService) runOKX(ctx context.Context) error {
 		if err := wsjson.Read(ctx, conn, &message); err != nil {
 			return err
 		}
-		s.markDirectRawMessage("okx")
 		if message.Arg.Channel == "candle1m" {
 			for _, raw := range message.Data {
 				if item, ok := s.normalizeOKXCandle(message.Arg.InstID, raw); ok && s.store != nil {
 					if err := s.store.saveCandle(ctx, item); err != nil {
 						log.Printf("save candle: %v", err)
 					}
-				}
-			}
-			continue
-		}
-		if message.Arg.Channel == "liquidation-orders" {
-			for _, raw := range message.Data {
-				for _, event := range s.normalizeOKXLiquidations(raw) {
-					s.handleEvent(ctx, event, "direct")
 				}
 			}
 		}
