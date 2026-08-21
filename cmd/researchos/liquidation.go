@@ -23,7 +23,6 @@ import (
 
 const (
 	liquidationRetention = 7 * 24 * time.Hour
-	defaultSymbolLimit   = 50
 	fallbackPollInterval = 5 * time.Second
 	fallbackBackfillAge  = 24 * time.Hour
 	defaultFallbackURL   = "http://10.15.0.6"
@@ -181,6 +180,21 @@ func (s *liquidationStore) migrate(ctx context.Context) error {
 			close DOUBLE PRECISION NOT NULL, volume DOUBLE PRECISION NOT NULL,
 			PRIMARY KEY (symbol, interval, open_time)
 		)`,
+		`CREATE TABLE IF NOT EXISTS risk_market_snapshots (
+			symbol TEXT NOT NULL, observed_at TIMESTAMPTZ NOT NULL,
+			mark_price DOUBLE PRECISION NOT NULL, spot_price DOUBLE PRECISION NOT NULL,
+			oi_usd DOUBLE PRECISION NOT NULL, funding_rate DOUBLE PRECISION NOT NULL,
+			cvd_delta_usd DOUBLE PRECISION NOT NULL, cvd_total_usd DOUBLE PRECISION NOT NULL,
+			basis_pct DOUBLE PRECISION NOT NULL, venue_count INTEGER NOT NULL,
+			PRIMARY KEY (symbol, observed_at)
+		)`,
+		`CREATE INDEX IF NOT EXISTS risk_market_snapshots_symbol_time_idx ON risk_market_snapshots (symbol, observed_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS risk_alert_events (
+			id BIGSERIAL PRIMARY KEY, symbol TEXT NOT NULL, level TEXT NOT NULL,
+			trigger_count INTEGER NOT NULL, signals JSONB NOT NULL, snapshot JSONB NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(), telegram_status TEXT NOT NULL DEFAULT 'not_configured', telegram_error TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS risk_alert_events_symbol_time_idx ON risk_alert_events (symbol, created_at DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -419,24 +433,23 @@ func (s *liquidationService) refreshUniverse(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("okx universe: %w", err)
 	}
-	combined := make([]marketSymbol, 0)
-	for base, b := range binance {
-		o, exists := okx[base]
-		if !exists {
-			continue
+	byBase := map[string]marketSymbol{}
+	for base, item := range binance {
+		byBase[base] = marketSymbol{Symbol: base + "-USDT", BinanceSymbol: item.Symbol, Turnover: item.Turnover}
+	}
+	for base, item := range okx {
+		current := byBase[base]
+		if current.Symbol == "" {
+			current.Symbol = base + "-USDT"
 		}
-		combined = append(combined, marketSymbol{Symbol: base + "-USDT", BinanceSymbol: b.Symbol, OKXInstrumentID: o.Symbol, OKXContractValue: o.ContractValue, Turnover: b.Turnover + o.Turnover})
+		current.OKXInstrumentID, current.OKXContractValue, current.Turnover = item.Symbol, item.ContractValue, current.Turnover+item.Turnover
+		byBase[base] = current
+	}
+	combined := make([]marketSymbol, 0, len(byBase))
+	for _, item := range byBase {
+		combined = append(combined, item)
 	}
 	sort.Slice(combined, func(i, j int) bool { return combined[i].Turnover > combined[j].Turnover })
-	limit := defaultSymbolLimit
-	if raw := strings.TrimSpace(os.Getenv("LIQUIDATION_SYMBOL_LIMIT")); raw != "" {
-		if value, convErr := strconv.Atoi(raw); convErr == nil && value > 0 && value <= 100 {
-			limit = value
-		}
-	}
-	if len(combined) > limit {
-		combined = combined[:limit]
-	}
 	if len(combined) == 0 {
 		return fmt.Errorf("no common USDT perpetuals returned")
 	}
@@ -444,8 +457,12 @@ func (s *liquidationService) refreshUniverse(ctx context.Context) error {
 	defer s.mu.Unlock()
 	s.symbols, s.byBinance, s.byOKX = combined, map[string]marketSymbol{}, map[string]marketSymbol{}
 	for _, symbol := range combined {
-		s.byBinance[symbol.BinanceSymbol] = symbol
-		s.byOKX[symbol.OKXInstrumentID] = symbol
+		if symbol.BinanceSymbol != "" {
+			s.byBinance[symbol.BinanceSymbol] = symbol
+		}
+		if symbol.OKXInstrumentID != "" {
+			s.byOKX[symbol.OKXInstrumentID] = symbol
+		}
 	}
 	return nil
 }
@@ -818,7 +835,9 @@ func (s *liquidationService) runOKX(ctx context.Context) error {
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	args := []map[string]string{{"channel": "liquidation-orders", "instType": "SWAP"}}
 	for _, symbol := range s.symbolsSnapshot() {
-		args = append(args, map[string]string{"channel": "candle5m", "instId": symbol.OKXInstrumentID})
+		if symbol.OKXInstrumentID != "" {
+			args = append(args, map[string]string{"channel": "candle5m", "instId": symbol.OKXInstrumentID})
+		}
 	}
 	if err := wsjson.Write(ctx, conn, map[string]any{"op": "subscribe", "args": args}); err != nil {
 		return err

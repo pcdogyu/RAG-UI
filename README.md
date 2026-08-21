@@ -52,12 +52,21 @@ $env:RAG_UI_UPLOAD_MAX_MB = '50'
 
 ```powershell
 $env:RAG_UI_DATABASE_URL = 'postgres://rag_ui_app:password@db-host:5432/RAG-UI?sslmode=disable'
-# 可选：共同上架的 USDT 永续合约数量与保留时长（默认 50、7 天）
-$env:LIQUIDATION_SYMBOL_LIMIT = '50'
+# Binance + OKX 全部活跃 USDT 永续合约与强平事件保留时长（默认 7 天）
 $env:LIQUIDATION_RETENTION_HOURS = '168'
+# 风险雷达 Telegram 告警（可选；只在部署环境的密钥管理中配置）
+$env:RISK_TELEGRAM_BOT_TOKEN = 'your-bot-token'
+$env:RISK_TELEGRAM_CHAT_ID = 'your-chat-id'
 ```
 
-未设置 `RAG_UI_DATABASE_URL` 时，服务仍可启动，但爆仓气泡图会显示数据库不可用状态且不会伪造历史数据。
+未设置 `RAG_UI_DATABASE_URL` 时，服务仍可启动，但爆仓气泡图和风险雷达会显示数据库不可用状态且不会伪造历史数据。Telegram 未配置时，风险事件仍会保存在站内，但不会外发。
+
+## 风险雷达与清算地图
+
+- 侧栏“清算地图”独立内嵌 ETH 30 日清算热区页面；它仅用于研究浏览。
+- 风险雷达以 Binance + OKX 全部活跃 USDT 永续合约为范围，每 5 分钟持久化价格、聚合 OI、Funding、采样 CVD 与永续/现货基差，并每 30 秒重新评估。
+- 清算结构来自已发生强平事件的价格桶、方向、金额和时间衰减，是**观测热区**，并非交易所公开的未来精确清算价。
+- 每个币种使用最近 24 小时的 5 分钟快照作为动态基线；清算结构迁移、OI/Funding、CVD、基差及近端热区中至少两项触发，才创建 `MEDIUM` 及以上研究风险事件。3 项为 `HIGH`，4 项及以上为 `CRITICAL`；相同等级有 15 分钟冷却，升级会重发。
 
 ## WeKnora 接入点
 
@@ -67,3 +76,4 @@ $env:LIQUIDATION_RETENTION_HOURS = '168'
 - `GET /api/v1/watchlist/brief`：只使用 WeKnora 已授权的外部实时检索生成 Crypto／美股 Bull、Base、Bear 情景和最新 10 条重大新闻；默认缓存 15 分钟，使用 `?refresh=1` 强制刷新，不查询内部知识库。
 - 智能问答在 WeKnora 未配置或故障时会明确报错，不会把演示内容伪装成生产研究结果。
 - `GET /api/v1/liquidations/symbols`、`/status`、`/chart` 和 `/stream`：爆仓气泡图的只读目录、采集状态、历史快照与浏览器实时推送接口。
+- `GET /api/v1/risk-radar/symbols`、`/snapshot?symbol=ETH-USDT`、`/events`：风险雷达的币对目录、单币实时快照/解释信号、全市场风险事件。数据库或首个快照未完成时会明确返回不可用状态。

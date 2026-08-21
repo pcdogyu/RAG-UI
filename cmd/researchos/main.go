@@ -72,6 +72,8 @@ func main() {
 	}
 	liquidations := newLiquidationService(liquidationStore)
 	liquidations.start(context.Background())
+	riskRadar := newRiskService(liquidationStore, liquidations)
+	riskRadar.start(context.Background())
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "research-os"})
 	})
@@ -80,6 +82,9 @@ func main() {
 	mux.HandleFunc("GET /api/v1/liquidations/status", liquidations.serveStatus)
 	mux.HandleFunc("GET /api/v1/liquidations/chart", liquidations.serveChart)
 	mux.HandleFunc("GET /api/v1/liquidations/stream", liquidations.serveLiveWS)
+	mux.HandleFunc("GET /api/v1/risk-radar/symbols", riskRadar.serveSymbols)
+	mux.HandleFunc("GET /api/v1/risk-radar/snapshot", riskRadar.serveSnapshot)
+	mux.HandleFunc("GET /api/v1/risk-radar/events", riskRadar.serveEvents)
 	mux.HandleFunc("GET /api/v1/research/reports", func(w http.ResponseWriter, _ *http.Request) {
 		// TODO(weknora): 由知识库检索与机构语义库组合查询替换。
 		writeJSON(w, http.StatusOK, []report{
