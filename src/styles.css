@@ -97,3 +97,9 @@ main { display:flex; flex-direction:column; min-height:100vh; }.page-content { f
 @media (max-width: 1260px) { .risk-level-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width: 760px) { .risk-toolbar,.risk-banner { align-items:flex-start; flex-direction:column; }.risk-level { text-align:left; }.metrics { grid-template-columns:1fr; }.signal { grid-template-columns:10px minmax(0,1fr); align-items:start; }.signal > .pill { grid-column:2; justify-self:start; margin:8px 0 0; } }
 @media (max-width: 760px) { .risk-trends .card-heading,.risk-levels .card-heading { display:grid; gap:12px; }.risk-range { width:100%; }.risk-range button { flex:1; }.risk-trend-grid,.risk-level-grid { grid-template-columns:1fr; }.risk-trend-chart { height:210px; } }
+
+/* A signal row contains both a bullet and a text Pill. Keep the bullet rules
+   away from the Pill so status labels such as “观察” retain their full size. */
+.signal > span:not(.pill) { width:8px; height:8px; background:#506076; border-radius:50%; grid-column:1; }
+.signal > span:not(.pill).signal-on { background:#ef6c80; box-shadow:0 0 0 4px #e9697f20; }
+.signal > .pill { width:auto; height:auto; border-radius:20px; }
