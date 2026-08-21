@@ -24,6 +24,9 @@ const (
 	riskEvaluationEvery  = 30 * time.Second
 	riskBaselineWindow   = 24 * time.Hour
 	riskAlertCooldown    = 15 * time.Minute
+	riskETHSymbol        = "ETH-USDT"
+	riskForecastCacheTTL = 5 * time.Minute
+	riskForecastWindow   = 30
 )
 
 type riskSnapshot struct {
@@ -47,6 +50,27 @@ type riskZone struct {
 	DistancePct float64 `json:"distance_pct"`
 }
 
+type riskForecastLevel struct {
+	Side        string  `json:"side"`
+	Price       float64 `json:"price"`
+	Intensity   float64 `json:"intensity"`
+	DistancePct float64 `json:"distance_pct"`
+}
+
+type riskForecast struct {
+	Levels    []riskForecastLevel `json:"levels"`
+	Status    string              `json:"status"`
+	UpdatedAt *time.Time          `json:"updated_at,omitempty"`
+	Source    string              `json:"source"`
+}
+
+type riskHistoryResponse struct {
+	Symbol    string         `json:"symbol"`
+	Range     string         `json:"range"`
+	Snapshots []riskSnapshot `json:"snapshots"`
+	Status    string         `json:"status"`
+}
+
 type riskSignal struct {
 	ID       string `json:"id"`
 	Title    string `json:"title"`
@@ -68,11 +92,13 @@ type riskAlertEvent struct {
 }
 
 type riskRadarResponse struct {
-	Snapshot riskSnapshot     `json:"snapshot"`
-	Zones    []riskZone       `json:"zones"`
-	Signals  []riskSignal     `json:"signals"`
-	Events   []riskAlertEvent `json:"events"`
-	Status   string           `json:"status"`
+	Snapshot       riskSnapshot     `json:"snapshot"`
+	Zones          []riskZone       `json:"zones"`
+	ObservedLevels []riskZone       `json:"observed_levels"`
+	Forecast       riskForecast     `json:"forecast"`
+	Signals        []riskSignal     `json:"signals"`
+	Events         []riskAlertEvent `json:"events"`
+	Status         string           `json:"status"`
 }
 
 type riskService struct {
@@ -84,10 +110,16 @@ type riskService struct {
 	previousZone map[string]riskZone
 	tradeCursor  map[string]int64
 	cvdTotal     map[string]float64
+	cvdSeeded    map[string]bool
+	forecastMu   sync.Mutex
+	forecastAt   time.Time
+	forecastData []riskForecastLevel
+	forecastErr  string
+	forecastTime time.Time
 }
 
 func newRiskService(store *liquidationStore, liquidations *liquidationService) *riskService {
-	return &riskService{store: store, liquidations: liquidations, client: &http.Client{Timeout: 12 * time.Second}, latest: map[string]riskSnapshot{}, previousZone: map[string]riskZone{}, tradeCursor: map[string]int64{}, cvdTotal: map[string]float64{}}
+	return &riskService{store: store, liquidations: liquidations, client: &http.Client{Timeout: 12 * time.Second}, latest: map[string]riskSnapshot{}, previousZone: map[string]riskZone{}, tradeCursor: map[string]int64{}, cvdTotal: map[string]float64{}, cvdSeeded: map[string]bool{}}
 }
 
 func (s *riskService) getJSON(ctx context.Context, endpoint string, result any) error {
@@ -147,29 +179,15 @@ func (s *riskService) refresh(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	var workers sync.WaitGroup
-	gate := make(chan struct{}, 12)
-	for _, symbol := range s.liquidations.symbolsSnapshot() {
-		symbol := symbol
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			select {
-			case gate <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-gate }()
-			snapshot, ok := s.collectSnapshot(ctx, symbol, binance, spots, okx)
-			if !ok || s.saveSnapshot(ctx, snapshot) != nil {
-				return
-			}
-			s.mu.Lock()
-			s.latest[symbol.Symbol] = snapshot
-			s.mu.Unlock()
-		}()
+	symbol := marketSymbol{Symbol: riskETHSymbol, BinanceSymbol: "ETHUSDT", OKXInstrumentID: "ETH-USDT-SWAP"}
+	s.ensureCVDSeed(ctx, symbol.Symbol)
+	snapshot, ok := s.collectSnapshot(ctx, symbol, binance, spots, okx)
+	if !ok || s.saveSnapshot(ctx, snapshot) != nil {
+		return
 	}
-	workers.Wait()
+	s.mu.Lock()
+	s.latest[symbol.Symbol] = snapshot
+	s.mu.Unlock()
 	s.evaluateAll(ctx)
 	// Keep the previous refresh's zone until evaluation has completed so a
 	// migration is measured against a real prior observation.
@@ -186,6 +204,29 @@ func (s *riskService) refresh(ctx context.Context) {
 			s.mu.Unlock()
 		}
 	}
+}
+
+// ensureCVDSeed preserves the displayed cumulative aggressive flow across a
+// process restart. The trade cursor is intentionally fresh, but the running
+// CVD total continues from the latest persisted observation.
+func (s *riskService) ensureCVDSeed(ctx context.Context, symbol string) {
+	s.mu.RLock()
+	seeded := s.cvdSeeded[symbol]
+	s.mu.RUnlock()
+	if seeded {
+		return
+	}
+	var total sql.NullFloat64
+	err := s.store.db.QueryRowContext(ctx, `SELECT cvd_total_usd FROM risk_market_snapshots WHERE symbol=$1 ORDER BY observed_at DESC LIMIT 1`, symbol).Scan(&total)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cvdSeeded[symbol] {
+		return
+	}
+	if err == nil && total.Valid {
+		s.cvdTotal[symbol] = total.Float64
+	}
+	s.cvdSeeded[symbol] = true
 }
 
 type binanceMarket struct{ Mark, Funding float64 }
@@ -418,15 +459,119 @@ func (s *riskService) zones(ctx context.Context, symbol string, mark float64) ([
 		}
 		item.value += notional * math.Exp(-time.Since(occurred).Hours()/4)
 	}
-	result := make([]riskZone, 0, len(bins))
+	bySide := map[string][]riskZone{"long": {}, "short": {}}
 	for _, item := range bins {
-		result = append(result, riskZone{Side: item.side, Price: item.price, NotionalUSD: item.value, DistancePct: math.Abs(item.price-mark) / mark * 100})
+		if item.side != "long" && item.side != "short" {
+			continue
+		}
+		bySide[item.side] = append(bySide[item.side], riskZone{Side: item.side, Price: item.price, NotionalUSD: item.value, DistancePct: math.Abs(item.price-mark) / mark * 100})
+	}
+	result := make([]riskZone, 0, 6)
+	for _, side := range []string{"long", "short"} {
+		levels := bySide[side]
+		sort.Slice(levels, func(i, j int) bool { return levels[i].NotionalUSD > levels[j].NotionalUSD })
+		if len(levels) > 3 {
+			levels = levels[:3]
+		}
+		result = append(result, levels...)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].NotionalUSD > result[j].NotionalUSD })
-	if len(result) > 6 {
-		result = result[:6]
-	}
 	return result, rows.Err()
+}
+
+type externalLiquidationMap struct {
+	CurrentPrice  float64     `json:"current_price"`
+	GeneratedAt   int64       `json:"generated_at"`
+	Prices        []float64   `json:"prices"`
+	IntensityGrid [][]float64 `json:"intensity_grid"`
+}
+
+func riskForecastBaseURL() string {
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("RISK_ETH_LIQUIDATION_MODEL_URL")), "/")
+	if base == "" {
+		return "http://10.15.0.6"
+	}
+	return base
+}
+
+func topForecastLevels(prices []float64, grid [][]float64, mark float64) []riskForecastLevel {
+	bySide := map[string][]riskForecastLevel{"long": {}, "short": {}}
+	for index, price := range prices {
+		if price <= 0 || index >= len(grid) || len(grid[index]) == 0 || math.Abs(price-mark)/mark < .0005 {
+			continue
+		}
+		intensity := 0.0
+		for _, value := range grid[index] {
+			if value > intensity && !math.IsNaN(value) && !math.IsInf(value, 0) {
+				intensity = value
+			}
+		}
+		if intensity <= 0 {
+			continue
+		}
+		side := "long"
+		if price > mark {
+			side = "short"
+		}
+		bySide[side] = append(bySide[side], riskForecastLevel{Side: side, Price: price, Intensity: intensity, DistancePct: math.Abs(price-mark) / mark * 100})
+	}
+	result := make([]riskForecastLevel, 0, 6)
+	for _, side := range []string{"long", "short"} {
+		levels := bySide[side]
+		sort.Slice(levels, func(i, j int) bool { return levels[i].Intensity > levels[j].Intensity })
+		if len(levels) > 3 {
+			levels = levels[:3]
+		}
+		result = append(result, levels...)
+	}
+	return result
+}
+
+func (s *riskService) forecast(ctx context.Context, mark float64) riskForecast {
+	if mark <= 0 {
+		return riskForecast{Status: "unavailable", Source: "ETH 外部模型预测压力区 / 30 天窗口"}
+	}
+	s.forecastMu.Lock()
+	defer s.forecastMu.Unlock()
+	if time.Since(s.forecastAt) >= riskForecastCacheTTL {
+		s.forecastAt = time.Now().UTC()
+		var payload externalLiquidationMap
+		endpoint := riskForecastBaseURL() + "/api/model/liquidation-map?days=" + strconv.Itoa(riskForecastWindow) + "&bucket_min=5&price_step=5&price_range=400"
+		if err := s.getJSON(ctx, endpoint, &payload); err != nil || len(payload.Prices) == 0 || len(payload.IntensityGrid) == 0 {
+			if err != nil {
+				s.forecastErr = "外部模型预测源暂不可用"
+			} else {
+				s.forecastErr = "外部模型预测源未返回有效网格"
+			}
+		} else {
+			s.forecastData = topForecastLevels(payload.Prices, payload.IntensityGrid, payload.CurrentPrice)
+			s.forecastTime = time.UnixMilli(payload.GeneratedAt).UTC()
+			if payload.GeneratedAt <= 0 {
+				s.forecastTime = s.forecastAt
+			}
+			s.forecastErr = ""
+		}
+	}
+	if s.forecastErr != "" && len(s.forecastData) == 0 {
+		return riskForecast{Status: "unavailable", Source: "ETH 外部模型预测压力区 / 30 天窗口"}
+	}
+	// Recalculate the distance and direction from the current risk snapshot,
+	// not from an older cached model price.
+	levels := make([]riskForecastLevel, 0, len(s.forecastData))
+	for _, item := range s.forecastData {
+		item.Side = "long"
+		if item.Price > mark {
+			item.Side = "short"
+		}
+		item.DistancePct = math.Abs(item.Price-mark) / mark * 100
+		levels = append(levels, item)
+	}
+	updated := s.forecastTime
+	status := "ok"
+	if s.forecastErr != "" {
+		status = "stale"
+	}
+	return riskForecast{Levels: levels, Status: status, UpdatedAt: &updated, Source: "ETH 外部模型预测压力区 / 30 天窗口"}
 }
 
 func meanStd(values []float64) (float64, float64) {
@@ -612,6 +757,32 @@ func (s *riskService) latestSnapshot(ctx context.Context, symbol string) (riskSn
 	return item, err
 }
 
+func (s *riskService) historyForRange(ctx context.Context, symbol string, duration time.Duration) ([]riskSnapshot, error) {
+	rows, err := s.store.db.QueryContext(ctx, `SELECT symbol, observed_at, mark_price, spot_price, oi_usd, funding_rate, cvd_delta_usd, cvd_total_usd, basis_pct, venue_count FROM risk_market_snapshots WHERE symbol=$1 AND observed_at >= $2 ORDER BY observed_at ASC`, symbol, time.Now().UTC().Add(-duration))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []riskSnapshot{}
+	for rows.Next() {
+		var item riskSnapshot
+		if err := rows.Scan(&item.Symbol, &item.ObservedAt, &item.MarkPrice, &item.SpotPrice, &item.OIUSD, &item.FundingRate, &item.CVDDeltaUSD, &item.CVDTotalUSD, &item.BasisPct, &item.VenueCount); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func riskHistoryRange(value string) (string, time.Duration, bool) {
+	if value == "" {
+		value = "24h"
+	}
+	durations := map[string]time.Duration{"4h": 4 * time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour}
+	duration, valid := durations[value]
+	return value, duration, valid
+}
+
 func (s *riskService) eventList(ctx context.Context, symbol string, limit int) ([]riskAlertEvent, error) {
 	query := `SELECT id,symbol,level,trigger_count,signals,snapshot,created_at,telegram_status,telegram_error FROM risk_alert_events`
 	args := []any{}
@@ -644,7 +815,7 @@ func (s *riskService) serveSymbols(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "risk radar database is not configured"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"symbols": s.liquidations.symbolsSnapshot(), "status": "collecting"})
+	writeJSON(w, http.StatusOK, map[string]any{"symbols": []marketSymbol{{Symbol: riskETHSymbol}}, "status": "collecting"})
 }
 func (s *riskService) serveSnapshot(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
@@ -652,8 +823,11 @@ func (s *riskService) serveSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	symbol := strings.TrimSpace(r.URL.Query().Get("symbol"))
-	if !s.liquidations.validSymbol(symbol) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown symbol"})
+	if symbol == "" {
+		symbol = riskETHSymbol
+	}
+	if symbol != riskETHSymbol {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ETH-USDT is the only supported risk radar symbol"})
 		return
 	}
 	snapshot, err := s.latestSnapshot(r.Context(), symbol)
@@ -668,14 +842,35 @@ func (s *riskService) serveSnapshot(w http.ResponseWriter, r *http.Request) {
 	zones, _ := s.zones(r.Context(), symbol, snapshot.MarkPrice)
 	signals, _ := s.signals(r.Context(), snapshot, zones)
 	events, _ := s.eventList(r.Context(), symbol, 8)
-	writeJSON(w, http.StatusOK, riskRadarResponse{Snapshot: snapshot, Zones: zones, Signals: signals, Events: events, Status: "ok"})
+	writeJSON(w, http.StatusOK, riskRadarResponse{Snapshot: snapshot, Zones: zones, ObservedLevels: zones, Forecast: s.forecast(r.Context(), snapshot.MarkPrice), Signals: signals, Events: events, Status: "ok"})
+}
+func (s *riskService) serveHistory(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "risk radar database is not configured"})
+		return
+	}
+	rangeName, duration, valid := riskHistoryRange(strings.TrimSpace(r.URL.Query().Get("range")))
+	if !valid {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "range must be one of 4h, 24h, 7d"})
+		return
+	}
+	snapshots, err := s.historyForRange(r.Context(), riskETHSymbol, duration)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to load risk history"})
+		return
+	}
+	status := "ok"
+	if len(snapshots) == 0 {
+		status = "collecting"
+	}
+	writeJSON(w, http.StatusOK, riskHistoryResponse{Symbol: riskETHSymbol, Range: rangeName, Snapshots: snapshots, Status: status})
 }
 func (s *riskService) serveEvents(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "risk radar database is not configured"})
 		return
 	}
-	events, err := s.eventList(r.Context(), strings.TrimSpace(r.URL.Query().Get("symbol")), 50)
+	events, err := s.eventList(r.Context(), riskETHSymbol, 50)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to load risk events"})
 		return

@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 func TestRiskLevelRequiresTwoSignals(t *testing.T) {
@@ -11,6 +12,42 @@ func TestRiskLevelRequiresTwoSignals(t *testing.T) {
 		if got := riskLevel(count); got != expected {
 			t.Fatalf("riskLevel(%d) = %q, want %q", count, got, expected)
 		}
+	}
+}
+
+func TestRiskHistoryRange(t *testing.T) {
+	name, duration, ok := riskHistoryRange("")
+	if !ok || name != "24h" || duration != 24*time.Hour {
+		t.Fatalf("default history range = %q, %s, %v", name, duration, ok)
+	}
+	if _, _, ok := riskHistoryRange("2h"); ok {
+		t.Fatal("unsupported history range was accepted")
+	}
+}
+
+func TestTopForecastLevelsSeparatesLongAndShort(t *testing.T) {
+	levels := topForecastLevels(
+		[]float64{90, 95, 100, 105, 110, 115, 120},
+		[][]float64{{2}, {9}, {100}, {8}, {4}, {7}, {6}},
+		100,
+	)
+	longs, shorts := 0, 0
+	for _, level := range levels {
+		if level.Side == "long" {
+			longs++
+			if level.Price >= 100 {
+				t.Fatalf("long forecast %v is not below price", level.Price)
+			}
+		}
+		if level.Side == "short" {
+			shorts++
+			if level.Price <= 100 {
+				t.Fatalf("short forecast %v is not above price", level.Price)
+			}
+		}
+	}
+	if longs != 2 || shorts != 3 {
+		t.Fatalf("directional forecast levels = %d long, %d short", longs, shorts)
 	}
 }
 

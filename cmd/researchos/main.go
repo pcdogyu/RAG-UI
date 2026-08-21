@@ -84,6 +84,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/liquidations/stream", liquidations.serveLiveWS)
 	mux.HandleFunc("GET /api/v1/risk-radar/symbols", riskRadar.serveSymbols)
 	mux.HandleFunc("GET /api/v1/risk-radar/snapshot", riskRadar.serveSnapshot)
+	mux.HandleFunc("GET /api/v1/risk-radar/history", riskRadar.serveHistory)
 	mux.HandleFunc("GET /api/v1/risk-radar/events", riskRadar.serveEvents)
 	mux.HandleFunc("GET /api/v1/research/reports", func(w http.ResponseWriter, _ *http.Request) {
 		// TODO(weknora): 由知识库检索与机构语义库组合查询替换。
