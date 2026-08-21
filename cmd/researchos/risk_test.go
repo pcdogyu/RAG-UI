@@ -100,3 +100,12 @@ func TestTradeDeltaOnlyCountsNewTrades(t *testing.T) {
 		t.Fatalf("deltas = %v, %v", first, second)
 	}
 }
+
+func TestSingleVenueSnapshotRemainsAvailable(t *testing.T) {
+	if got := riskAvailability(1); got != "single-venue" {
+		t.Fatalf("single venue availability = %q", got)
+	}
+	if got := riskAvailability(2); got != "binance+okx" {
+		t.Fatalf("dual venue availability = %q", got)
+	}
+}

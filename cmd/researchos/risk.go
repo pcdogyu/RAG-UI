@@ -180,10 +180,7 @@ func (s *riskService) refresh(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 55*time.Second)
 	defer cancel()
-	binance, spots, okx, err := s.marketBooks(ctx)
-	if err != nil {
-		return
-	}
+	binance, spots, okx := s.marketBooks(ctx)
 	symbol := marketSymbol{Symbol: riskETHSymbol, BinanceSymbol: "ETHUSDT", OKXInstrumentID: "ETH-USDT-SWAP"}
 	s.ensureCVDSeed(ctx, symbol.Symbol)
 	snapshot, ok := s.collectSnapshot(ctx, symbol, binance, spots, okx)
@@ -237,7 +234,7 @@ func (s *riskService) ensureCVDSeed(ctx context.Context, symbol string) {
 type binanceMarket struct{ Mark, Funding float64 }
 type okxMarket struct{ Mark, OI, Funding float64 }
 
-func (s *riskService) marketBooks(ctx context.Context) (map[string]binanceMarket, map[string]float64, map[string]okxMarket, error) {
+func (s *riskService) marketBooks(ctx context.Context) (map[string]binanceMarket, map[string]float64, map[string]okxMarket) {
 	var futures []struct {
 		Symbol          string `json:"symbol"`
 		MarkPrice       string `json:"markPrice"`
@@ -259,18 +256,13 @@ func (s *riskService) marketBooks(ctx context.Context) (map[string]binanceMarket
 			OICcy  string `json:"oiCcy"`
 		} `json:"data"`
 	}
-	if err := s.getJSON(ctx, "https://fapi.binance.com/fapi/v1/premiumIndex", &futures); err != nil {
-		return nil, nil, nil, err
-	}
-	if err := s.getJSON(ctx, "https://api.binance.com/api/v3/ticker/price", &spotRows); err != nil {
-		return nil, nil, nil, err
-	}
-	if err := s.getJSON(ctx, "https://www.okx.com/api/v5/market/tickers?instType=SWAP", &okxTickers); err != nil {
-		return nil, nil, nil, err
-	}
-	if err := s.getJSON(ctx, "https://www.okx.com/api/v5/public/open-interest?instType=SWAP", &okxOI); err != nil {
-		return nil, nil, nil, err
-	}
+	// Each public venue is optional for a snapshot. Binance can be unavailable
+	// from a deployment region while OKX remains healthy; never discard a valid
+	// one-sided ETH observation merely because another venue rejects a request.
+	_ = s.getJSON(ctx, "https://fapi.binance.com/fapi/v1/premiumIndex", &futures)
+	_ = s.getJSON(ctx, "https://api.binance.com/api/v3/ticker/price", &spotRows)
+	_ = s.getJSON(ctx, "https://www.okx.com/api/v5/market/tickers?instType=SWAP", &okxTickers)
+	_ = s.getJSON(ctx, "https://www.okx.com/api/v5/public/open-interest?instType=SWAP", &okxOI)
 	binance := map[string]binanceMarket{}
 	for _, row := range futures {
 		binance[row.Symbol] = binanceMarket{Mark: number(row.MarkPrice), Funding: number(row.LastFundingRate)}
@@ -290,7 +282,7 @@ func (s *riskService) marketBooks(ctx context.Context) (map[string]binanceMarket
 		item.OI = number(row.OICcy) * item.Mark
 		okx[row.InstID] = item
 	}
-	return binance, spots, okx, nil
+	return binance, spots, okx
 }
 
 func (s *riskService) collectSnapshot(ctx context.Context, symbol marketSymbol, binance map[string]binanceMarket, spots map[string]float64, okx map[string]okxMarket) (riskSnapshot, bool) {
@@ -334,7 +326,14 @@ func (s *riskService) collectSnapshot(ctx context.Context, symbol marketSymbol, 
 	if fundingWeight > 0 {
 		fundingRate = funding / fundingWeight
 	}
-	return riskSnapshot{Symbol: symbol.Symbol, ObservedAt: time.Now().UTC().Truncate(time.Minute), MarkPrice: mark, SpotPrice: spot, OIUSD: oi, FundingRate: fundingRate, CVDDeltaUSD: cvd, CVDTotalUSD: total, BasisPct: (mark - spot) / spot * 100, VenueCount: venues}, true
+	return riskSnapshot{Symbol: symbol.Symbol, ObservedAt: time.Now().UTC().Truncate(time.Minute), MarkPrice: mark, SpotPrice: spot, OIUSD: oi, FundingRate: fundingRate, CVDDeltaUSD: cvd, CVDTotalUSD: total, BasisPct: (mark - spot) / spot * 100, VenueCount: venues, Availability: riskAvailability(venues)}, true
+}
+
+func riskAvailability(venues int) string {
+	if venues == 1 {
+		return "single-venue"
+	}
+	return "binance+okx"
 }
 
 func (s *riskService) binanceMetrics(ctx context.Context, symbol string, mark float64) (float64, float64) {
