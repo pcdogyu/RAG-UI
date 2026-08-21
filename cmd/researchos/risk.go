@@ -57,6 +57,11 @@ type riskForecastLevel struct {
 	DistancePct float64 `json:"distance_pct"`
 }
 
+type riskForecastBucket struct {
+	Price     float64
+	Intensity float64
+}
+
 type riskForecast struct {
 	Levels    []riskForecastLevel `json:"levels"`
 	Status    string              `json:"status"`
@@ -113,7 +118,7 @@ type riskService struct {
 	cvdSeeded    map[string]bool
 	forecastMu   sync.Mutex
 	forecastAt   time.Time
-	forecastData []riskForecastLevel
+	forecastData []riskForecastBucket
 	forecastErr  string
 	forecastTime time.Time
 }
@@ -494,10 +499,10 @@ func riskForecastBaseURL() string {
 	return base
 }
 
-func topForecastLevels(prices []float64, grid [][]float64, mark float64) []riskForecastLevel {
-	bySide := map[string][]riskForecastLevel{"long": {}, "short": {}}
+func forecastBuckets(prices []float64, grid [][]float64) []riskForecastBucket {
+	result := make([]riskForecastBucket, 0, len(prices))
 	for index, price := range prices {
-		if price <= 0 || index >= len(grid) || len(grid[index]) == 0 || math.Abs(price-mark)/mark < .0005 {
+		if price <= 0 || index >= len(grid) || len(grid[index]) == 0 {
 			continue
 		}
 		intensity := 0.0
@@ -506,14 +511,24 @@ func topForecastLevels(prices []float64, grid [][]float64, mark float64) []riskF
 				intensity = value
 			}
 		}
-		if intensity <= 0 {
+		if intensity > 0 {
+			result = append(result, riskForecastBucket{Price: price, Intensity: intensity})
+		}
+	}
+	return result
+}
+
+func topForecastBuckets(buckets []riskForecastBucket, mark float64) []riskForecastLevel {
+	bySide := map[string][]riskForecastLevel{"long": {}, "short": {}}
+	for _, bucket := range buckets {
+		if math.Abs(bucket.Price-mark)/mark < .0005 {
 			continue
 		}
 		side := "long"
-		if price > mark {
+		if bucket.Price > mark {
 			side = "short"
 		}
-		bySide[side] = append(bySide[side], riskForecastLevel{Side: side, Price: price, Intensity: intensity, DistancePct: math.Abs(price-mark) / mark * 100})
+		bySide[side] = append(bySide[side], riskForecastLevel{Side: side, Price: bucket.Price, Intensity: bucket.Intensity, DistancePct: math.Abs(bucket.Price-mark) / mark * 100})
 	}
 	result := make([]riskForecastLevel, 0, 6)
 	for _, side := range []string{"long", "short"} {
@@ -525,6 +540,10 @@ func topForecastLevels(prices []float64, grid [][]float64, mark float64) []riskF
 		result = append(result, levels...)
 	}
 	return result
+}
+
+func topForecastLevels(prices []float64, grid [][]float64, mark float64) []riskForecastLevel {
+	return topForecastBuckets(forecastBuckets(prices, grid), mark)
 }
 
 func (s *riskService) forecast(ctx context.Context, mark float64) riskForecast {
@@ -544,7 +563,7 @@ func (s *riskService) forecast(ctx context.Context, mark float64) riskForecast {
 				s.forecastErr = "外部模型预测源未返回有效网格"
 			}
 		} else {
-			s.forecastData = topForecastLevels(payload.Prices, payload.IntensityGrid, payload.CurrentPrice)
+			s.forecastData = forecastBuckets(payload.Prices, payload.IntensityGrid)
 			s.forecastTime = time.UnixMilli(payload.GeneratedAt).UTC()
 			if payload.GeneratedAt <= 0 {
 				s.forecastTime = s.forecastAt
@@ -555,17 +574,9 @@ func (s *riskService) forecast(ctx context.Context, mark float64) riskForecast {
 	if s.forecastErr != "" && len(s.forecastData) == 0 {
 		return riskForecast{Status: "unavailable", Source: "ETH 外部模型预测压力区 / 30 天窗口"}
 	}
-	// Recalculate the distance and direction from the current risk snapshot,
-	// not from an older cached model price.
-	levels := make([]riskForecastLevel, 0, len(s.forecastData))
-	for _, item := range s.forecastData {
-		item.Side = "long"
-		if item.Price > mark {
-			item.Side = "short"
-		}
-		item.DistancePct = math.Abs(item.Price-mark) / mark * 100
-		levels = append(levels, item)
-	}
+	// Recalculate the top directional levels from the complete cached grid and
+	// the current risk snapshot, not from the source's older model price.
+	levels := topForecastBuckets(s.forecastData, mark)
 	updated := s.forecastTime
 	status := "ok"
 	if s.forecastErr != "" {

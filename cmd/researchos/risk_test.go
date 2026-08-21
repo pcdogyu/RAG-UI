@@ -51,6 +51,23 @@ func TestTopForecastLevelsSeparatesLongAndShort(t *testing.T) {
 	}
 }
 
+func TestCachedForecastBucketsReclassifyAgainstCurrentPrice(t *testing.T) {
+	buckets := []riskForecastBucket{{Price: 2325, Intensity: 10}, {Price: 2400, Intensity: 20}, {Price: 2475, Intensity: 30}}
+	levels := topForecastBuckets(buckets, 2438)
+	longs, shorts := 0, 0
+	for _, level := range levels {
+		if level.Side == "long" {
+			longs++
+		}
+		if level.Side == "short" {
+			shorts++
+		}
+	}
+	if longs != 2 || shorts != 1 {
+		t.Fatalf("reclassified levels = %d long, %d short", longs, shorts)
+	}
+}
+
 func TestZScoreUsesDynamicBaseline(t *testing.T) {
 	if got := zScore(15, []float64{10, 10, 10}); got != 0 {
 		t.Fatalf("zero-variance z-score = %v, want 0", got)
